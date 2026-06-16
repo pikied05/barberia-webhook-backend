@@ -26,7 +26,7 @@ const CHAKRA_PLUGIN_ID = process.env.CHAKRA_PLUGIN_ID;
 const CHAKRA_API_KEY   = process.env.CHAKRA_API_KEY;
 const CHAKRA_PHONE_ID  = process.env.CHAKRA_PHONE_NUMBER_ID;
 const WA_API_VERSION   = process.env.WA_API_VERSION || 'v20.0';
-const VERIFY_TOKEN     = process.env.WEBHOOK_VERIFY_TOKEN || 'imperium_verify_2024';
+const VERIFY_TOKEN     = process.env.WEBHOOK_VERIFY_TOKEN;
 
 const chakraHeaders = () => ({
   Authorization: `Bearer ${CHAKRA_API_KEY}`,
@@ -36,7 +36,12 @@ const chakraHeaders = () => ({
 // ─── Helpers de Chakra ────────────────────────────────────────────────────────
 
 function normalizePhone(raw = '') {
-  return raw.replace(/\s+/g, '').replace(/^00/, '').replace(/^\+/, '');
+  let p = raw.replace(/\s+/g, '').replace(/^00/, '').replace(/^\+/, '');
+  // Si es número mexicano de 10 dígitos, agregar 52
+  if (p.length === 10 && !p.startsWith('52')) {
+    p = '52' + p;
+  }
+  return p;
 }
 
 async function chakraSendSession(to, message) {
@@ -287,7 +292,7 @@ app.post('/chakra-send-image', async (req, res) => {
 // ─── Cron: recordatorios 24h antes ───────────────────────────────────────────
 // Se ejecuta todos los días a las 10:00 AM (hora del servidor en Render = UTC)
 // Si tu barbería está en México (UTC-6), las 10am locales = 16:00 UTC
-cron.schedule('0 16 * * *', async () => {
+cron.schedule('0 15 * * *', async () => {
   console.log('⏰ Cron: enviando recordatorios 24h...');
 
   const tomorrow = new Date();
@@ -331,6 +336,21 @@ cron.schedule('0 16 * * *', async () => {
     }
   } catch (err) {
     console.error('❌ Error en cron recordatorios:', err.message);
+  }
+});
+
+//test-reminder 
+app.post('/test-send-reminder', async (req, res) => {
+  const { phone, name, time, barber } = req.body;
+  try {
+    await chakraSendTemplate(phone, 'barberia_recordatorio_24h', [
+      name.split(' ')[0],
+      time,
+      barber,
+    ]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
