@@ -341,26 +341,20 @@ cron.schedule('0 15 * * *', async () => {
 
 //test-reminder 
 app.post('/test-send-reminder', async (req, res) => {
-  const { phone, name, time, barber } = req.body;
-  console.log('🧪 Test reminder - datos recibidos:', { phone, name, time, barber });
+  const { phone, variables } = req.body;
+  console.log('🧪 Enviando plantilla con variables:', variables);
   try {
-    await chakraSendTemplate(phone, 'barberia_recordatorio_24h', [
-      name.split(' ')[0],
-      time,
-      barber,
-    ]);
-    console.log('✅ Template enviado correctamente');
-    res.json({ success: true });
+    await chakraSendTemplate(phone, 'barberia_recordatorio_24h', variables);
+    res.json({ success: true, variablesUsadas: variables });
   } catch (err) {
-    console.error('❌ Error detallado:', err.response?.data || err.message);
+    console.error('❌ Error:', err.response?.data || err.message);
     res.status(500).json({ 
       success: false, 
       error: err.message,
-      detail: err.response?.data ?? null  // ← esto nos dice qué rechazó Chakra
+      detail: err.response?.data ?? null
     });
   }
 });
-
 // ─── Inicio ───────────────────────────────────────────────────────────────────
 
 const PORT = process.env.PORT || 3001;
