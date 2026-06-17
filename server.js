@@ -103,6 +103,16 @@ function toYMD(date) {
   return date.toISOString().slice(0, 10);
 }
 
+// Formatea un YYYY-MM-DD como "15 de junio" sin construir un Date (evita
+// desfases de zona horaria al parsear strings de fecha).
+function formatFechaCorta(ymd) {
+  if (!ymd || ymd.length < 10) return ymd || '';
+  const [, m, d] = ymd.split('-');
+  const meses = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+  const monthIndex = parseInt(m, 10) - 1;
+  return `${parseInt(d, 10)} de ${meses[monthIndex] || ymd}`;
+}
+
 async function getSlotsLibres(barberId, dateStr) {
   const { data: citas } = await supabase
     .from('appointments')
@@ -213,6 +223,23 @@ async function getClienteYCita(from) {
   }
 
   return { client, cita };
+}
+
+// ─── Encuesta de satisfacción pendiente de respuesta ─────────────────────────
+async function getEncuestaPendiente(from) {
+  const digits10 = from.replace(/^52/, '').slice(-10);
+  const limiteFecha = new Date();
+  limiteFecha.setDate(limiteFecha.getDate() - 3); // después de 3 días sin respuesta, deja de "esperar" feedback
+  const { data } = await supabase
+    .from('appointments')
+    .select('id, date')
+    .ilike('client_phone', `%${digits10}%`)
+    .eq('survey_sent', true)
+    .is('survey_responded_at', null)
+    .gte('survey_sent_at', limiteFecha.toISOString())
+    .order('date', { ascending: false })
+    .limit(1);
+  return data?.[0] || null;
 }
 
 // ─── Health ───────────────────────────────────────────────────────────────────
@@ -495,12 +522,33 @@ app.post('/webhook', async (req, res) => {
     // RESPUESTAS AUTOMÁTICAS GENERALES
     // ══════════════════════════════════════════════════════════════════════════
 
+    // ── Respuesta a encuesta de satisfacción (texto libre, sin botones ni escala) ──
+    // Se revisa primero porque la plantilla invita a comentar libremente, y un
+    // comentario real puede incluir palabras como "gracias" u "hola" que de otro
+    // modo dispararían esas otras respuestas automáticas antes de tiempo.
+    const encuestaPendiente = await getEncuestaPendiente(from);
+    if (encuestaPendiente) {
+      const { client: clienteEncuesta } = await getClienteYCita(from);
+      const firstNameEncuesta = clienteEncuesta?.name?.split(' ')[0] || 'amigo';
+
+      await supabase.from('appointments').update({
+        survey_feedback: text,
+        survey_responded_at: new Date().toISOString(),
+      }).eq('id', encuestaPendiente.id);
+
+      await chakraSendSession(from,
+        `¡Muchas gracias por contarnos, ${firstNameEncuesta}! 🙏 Tomamos en cuenta tu comentario para seguir mejorando.`
+      );
+      console.log(`⭐ Encuesta de cita ${encuestaPendiente.id} respondida por ${clienteEncuesta?.name ?? from}`);
+      return;
+    }
+
     // ── Gracias ──────────────────────────────────────────────────────────────
     const esGracias = ['gracias', 'muchas gracias', 'thank', 'thanks', '🙏'].some(k => textLower.includes(k));
     if (esGracias) {
       const { client } = await getClienteYCita(from);
       const firstName = client?.name?.split(' ')[0] || 'amigo';
-      await chakraSendSession(from, `¡De nada ${firstName}! 😊 Con gusto. ¿Hay algo más en lo que te pueda ayudar?`);
+      await chakraSendSession(from, `¡Con gusto${firstName}! ¿Hay algo más en lo que te pueda ayudar?`);
       return;
     }
 
@@ -562,6 +610,9 @@ app.post('/webhook', async (req, res) => {
       );
       return;
     }
+
+    // ── Respuesta a encuesta de satisfacción ──────────────────────────────────
+    // (este caso ya se atendió más arriba, antes del bloque de "Gracias")
 
     const esConfirmacion = ['sí, confirmo', 'sí', 'si', 'confirmo', 'confirmar', '1', 'yes', 'ok', '✅'].some(k => textLower.includes(k));
     const esCancelacion  = ['no puedo asistir', 'no', 'cancelar', 'cancelo', 'cancel', '2', 'cancelación'].some(k => textLower.includes(k));
@@ -643,6 +694,30 @@ app.get('/run-reminders', async (req, res) => {
   res.json({ success: true, message: 'Recordatorios iniciados' });
 });
 
+app.get('/test-encuestas', async (req, res) => {
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayStr = yesterday.toISOString().slice(0, 10);
+  const { data: citas, error } = await supabase
+    .from('appointments')
+    .select('id, date, status, client_name, client_phone, survey_sent, survey_responded_at')
+    .eq('date', yesterdayStr);
+  res.json({
+    serverTime: new Date().toISOString(),
+    ayerBuscado: yesterdayStr,
+    citasEncontradas: citas?.length ?? 0,
+    pendientesDeEncuesta: citas?.filter(c => c.status === 'confirmada' && !c.survey_sent).length ?? 0,
+    citas: citas ?? [],
+    error: error?.message ?? null,
+  });
+});
+
+app.get('/run-encuestas', async (req, res) => {
+  console.log('⭐ Encuestas disparadas externamente');
+  enviarEncuestas('EXTERNO').catch(console.error);
+  res.json({ success: true, message: 'Encuestas iniciadas' });
+});
+
 // ─── Función compartida de recordatorios ─────────────────────────────────────
 
 async function enviarRecordatorios(etiqueta = '') {
@@ -679,6 +754,47 @@ async function enviarRecordatorios(etiqueta = '') {
   }
 }
 
+// ─── Función compartida de encuestas de satisfacción ─────────────────────────
+// Se manda 1 día después de la fecha de la cita, solo si la cita quedó
+// confirmada (no si fue cancelada, ni si nunca se confirmó).
+async function enviarEncuestas(etiqueta = '') {
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayStr = yesterday.toISOString().slice(0, 10);
+  console.log(`⭐ [${etiqueta}] Enviando encuestas de satisfacción para citas del ${yesterdayStr}...`);
+
+  const { data: citas, error } = await supabase
+    .from('appointments')
+    .select('id, date, status, client_name, client_phone, survey_sent')
+    .eq('date', yesterdayStr)
+    .eq('status', 'confirmada')
+    .or('survey_sent.is.null,survey_sent.eq.false');
+
+  if (error) { console.error(`❌ [${etiqueta}] Error:`, error.message); return; }
+  if (!citas?.length) { console.log(`ℹ️ [${etiqueta}] Sin citas pendientes de encuesta`); return; }
+
+  console.log(`📋 [${etiqueta}] ${citas.length} cita(s) pendientes de encuesta`);
+
+  for (const cita of citas) {
+    if (!cita.client_phone) { console.warn(`⚠️ Cita ${cita.id} sin teléfono`); continue; }
+    try {
+      // Plantilla con 2 variables: {{1}} nombre  {{2}} fecha de la cita
+      await chakraSendTemplate(cita.client_phone, 'barberia_encuesta_servicio', [
+        cita.client_name?.split(' ')[0] ?? 'Cliente',
+        formatFechaCorta(cita.date),
+      ]);
+      await supabase.from('appointments').update({
+        survey_sent: true,
+        survey_sent_at: new Date().toISOString(),
+      }).eq('id', cita.id);
+      console.log(`✅ Encuesta enviada a ${cita.client_name} (${cita.client_phone})`);
+      await new Promise(r => setTimeout(r, 1000));
+    } catch (sendErr) {
+      console.error(`❌ Error enviando encuesta a ${cita.client_name}:`, sendErr.response?.data || sendErr.message);
+    }
+  }
+}
+
 // ─── Cron matutino: 10:00 AM CDMX (16:00 UTC) ────────────────────────────────
 cron.schedule('0 16 * * *', () => {
   console.log('🌅 Cron matutino disparado');
@@ -689,6 +805,12 @@ cron.schedule('0 16 * * *', () => {
 cron.schedule('0 0 * * *', () => {
   console.log('🌙 Cron nocturno disparado');
   enviarRecordatorios('NOCHE');
+});
+
+// ─── Cron de encuestas: 11:00 AM CDMX (17:00 UTC) ────────────────────────────
+cron.schedule('0 17 * * *', () => {
+  console.log('⭐ Cron de encuestas disparado');
+  enviarEncuestas('ENCUESTA');
 });
 
 // ─── Inicio ───────────────────────────────────────────────────────────────────
