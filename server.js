@@ -609,7 +609,7 @@ async function enviarRecordatorios(etiqueta = '') {
 }
 
 // ─── Cron matutino: 10:00 AM CDMX (16:00 UTC) ────────────────────────────────
-cron.schedule('0 16 * * *', () => {
+cron.schedule('0 18 * * *', () => {
   console.log('🌅 Cron matutino disparado');
   enviarRecordatorios('MAÑANA');
 });
