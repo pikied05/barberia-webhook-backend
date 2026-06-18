@@ -33,17 +33,13 @@ const chakraHeaders = () => ({
   'Content-Type': 'application/json',
 });
 
-// ─── Idioma(s) aprobado(s) en Meta por cada plantilla ─────────────────────────
-// ⚠️ No todas las plantillas se aprobaron en el mismo idioma. Si el primer
-// candidato falla por error 132001 ("Template name does not exist in the
-// translation"), chakraSendTemplate prueba automáticamente el siguiente.
+// ─── Idiomas aprobados por plantilla ─────────────────────────────────────────
 const TEMPLATE_LANGUAGE_CANDIDATES = {
   barberia_ticket_venta:      ['es_MX'],
   barberia_recordatorio_24h:  ['es_MX'],
   barberia_confirmacion_cita: ['es_MX'],
   barberia_encuesta_servicio: ['es_MX'],
   barberia_cupon_lealtad:     ['es_MX'],
-  // es_MX y en_US ya se descartaron para esta plantilla (error 132001 en ambos)
   barberia_reenganche:        ['en', 'en_GB', 'en_US', 'es_MX'],
 };
 
@@ -51,13 +47,7 @@ const TEMPLATE_LANGUAGE_CANDIDATES = {
 
 function normalizePhone(raw = '') {
   let p = raw.replace(/\s+/g, '').replace(/^00/, '').replace(/^\+/, '');
-  // Algunas integraciones viejas (Twilio, 360dialog, API on-premise) guardaban
-  // los números de México como 521 + 10 dígitos. La Cloud API oficial de Meta
-  // NO reconoce ese "1" extra y regresa "Message undeliverable" (131026) aunque
-  // el número sí tenga WhatsApp. Lo quitamos antes de mandar.
-  if (p.startsWith('521') && p.length === 13) {
-    p = '52' + p.slice(3);
-  }
+  if (p.startsWith('521') && p.length === 13) p = '52' + p.slice(3);
   if (p.length === 10 && !p.startsWith('52')) p = '52' + p;
   return p;
 }
@@ -99,15 +89,15 @@ async function chakraSendTemplate(to, templateName, variables) {
       }, { headers: chakraHeaders(), timeout: 15000 });
 
       const wamid = resp.data?.messages?.[0]?.id;
-      console.log(`✅ Plantilla "${templateName}" aceptada por Meta (idioma "${lang}") — wamid: ${wamid}`);
-      return; // éxito, ya no probamos más candidatos
+      console.log(`✅ Plantilla "${templateName}" aceptada (idioma "${lang}") — wamid: ${wamid}`);
+      return;
     } catch (error) {
       ultimoError = error;
-      if (!esErrorDeIdioma(error)) throw error; // es otro tipo de error, no sigas probando idiomas
-      console.warn(`⚠️ Idioma "${lang}" no válido para "${templateName}" (132001), probando siguiente candidato...`);
+      if (!esErrorDeIdioma(error)) throw error;
+      console.warn(`⚠️ Idioma "${lang}" no válido para "${templateName}", probando siguiente...`);
     }
   }
-  throw ultimoError; // se agotaron los candidatos
+  throw ultimoError;
 }
 
 // ─── Lógica de disponibilidad ─────────────────────────────────────────────────
@@ -145,14 +135,11 @@ function toYMD(date) {
   return date.toISOString().slice(0, 10);
 }
 
-// Formatea un YYYY-MM-DD como "15 de junio" sin construir un Date (evita
-// desfases de zona horaria al parsear strings de fecha).
 function formatFechaCorta(ymd) {
   if (!ymd || ymd.length < 10) return ymd || '';
   const [, m, d] = ymd.split('-');
   const meses = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
-  const monthIndex = parseInt(m, 10) - 1;
-  return `${parseInt(d, 10)} de ${meses[monthIndex] || ymd}`;
+  return `${parseInt(d, 10)} de ${meses[parseInt(m, 10) - 1] || ymd}`;
 }
 
 async function getSlotsLibres(barberId, dateStr) {
@@ -193,9 +180,7 @@ async function getSlotsLibres(barberId, dateStr) {
 
 async function buildDisponibilidadMsg() {
   const { data: barberos } = await supabase
-    .from('barbers')
-    .select('id, name, schedule')
-    .eq('active', true);
+    .from('barbers').select('id, name, schedule').eq('active', true);
 
   if (!barberos?.length) return '😔 No hay barberos disponibles en este momento.';
 
@@ -230,9 +215,7 @@ async function buildDisponibilidadMsg() {
     }
   }
 
-  if (!hayDisponibilidad) {
-    return '😔 No hay horarios disponibles en los próximos días. Escríbenos para buscar una fecha alternativa.';
-  }
+  if (!hayDisponibilidad) return '😔 No hay horarios disponibles en los próximos días. Escríbenos para buscar una fecha alternativa.';
 
   msg += '➡️ Responde con el *nombre del barbero* y la *hora* que prefieras.\nEj: _Giovanni 15:00_';
   return msg;
@@ -241,13 +224,12 @@ async function buildDisponibilidadMsg() {
 // ─── Estado de conversación en memoria ───────────────────────────────────────
 const conversationState = {};
 
-// ─── Función compartida: buscar cliente y cita próxima ───────────────────────
+// ─── Helpers de búsqueda ──────────────────────────────────────────────────────
+
 async function getClienteYCita(from) {
   const digits10 = from.replace(/^52/, '').slice(-10);
   const { data: clientRows } = await supabase
-    .from('clients')
-    .select('id, name, phone')
-    .or(`phone.ilike.%${digits10}%`);
+    .from('clients').select('id, name, phone').or(`phone.ilike.%${digits10}%`);
   const client = clientRows?.[0] || null;
 
   let cita = null;
@@ -267,11 +249,10 @@ async function getClienteYCita(from) {
   return { client, cita };
 }
 
-// ─── Encuesta de satisfacción pendiente de respuesta ─────────────────────────
 async function getEncuestaPendiente(from) {
   const digits10 = from.replace(/^52/, '').slice(-10);
   const limiteFecha = new Date();
-  limiteFecha.setDate(limiteFecha.getDate() - 3); // después de 3 días sin respuesta, deja de "esperar" feedback
+  limiteFecha.setDate(limiteFecha.getDate() - 3);
   const { data } = await supabase
     .from('appointments')
     .select('id, date')
@@ -289,11 +270,7 @@ async function getEncuestaPendiente(from) {
 app.get('/health', (req, res) => {
   const missing = ['CHAKRA_API_KEY', 'CHAKRA_PLUGIN_ID', 'CHAKRA_PHONE_NUMBER_ID', 'SUPABASE_URL', 'SUPABASE_SERVICE_KEY']
     .filter(k => !process.env[k]);
-  res.json({
-    status: missing.length === 0 ? 'healthy' : 'misconfigured',
-    missing,
-    timestamp: new Date().toISOString(),
-  });
+  res.json({ status: missing.length === 0 ? 'healthy' : 'misconfigured', missing, timestamp: new Date().toISOString() });
 });
 
 // ─── Envío de sesión ──────────────────────────────────────────────────────────
@@ -322,15 +299,10 @@ app.post('/chakra-send-template', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     const status = error.response?.status ?? 500;
-    // El error real puede venir como Graph API ({error:{message}}) o como lo
-    // envuelve Chakra ({_errors: ["..."]}). Probamos ambas formas.
     const metaError = error.response?.data?.error;
-    const errMsg = metaError?.message
-      || error.response?.data?._errors?.join('; ')
-      || error.response?.data?.message
-      || error.message;
+    const errMsg = metaError?.message || error.response?.data?._errors?.join('; ') || error.response?.data?.message || error.message;
     console.error('❌ chakra-send-template:', JSON.stringify(error.response?.data ?? errMsg));
-    res.status(status).json({ success: false, error: errMsg, metaCode: metaError?.code, metaSubcode: metaError?.error_subcode });
+    res.status(status).json({ success: false, error: errMsg, metaCode: metaError?.code });
   }
 });
 
@@ -344,7 +316,6 @@ app.post('/chakra-send-image', async (req, res) => {
     const base64Data = image.replace(/^data:image\/\w+;base64,/, '');
     const imageBuffer = Buffer.from(base64Data, 'base64');
 
-    // Subir imagen a WhatsApp Media vía Chakra
     const FormData = (await import('form-data')).default;
     const form = new FormData();
     form.append('file', imageBuffer, { filename: 'ticket.png', contentType: 'image/png' });
@@ -375,6 +346,43 @@ app.post('/chakra-send-image', async (req, res) => {
   }
 });
 
+// ─── Endpoint: marcar reenganche enviado desde el frontend ───────────────────
+// El frontend llama este endpoint después de enviar el reenganche para que
+// quede registrado en Supabase y no se vuelva a mandar (ni al recargar).
+app.post('/reenganche-sent', async (req, res) => {
+  const { clientId } = req.body;
+  if (!clientId) return res.status(400).json({ success: false, error: 'Falta clientId' });
+  try {
+    await supabase
+      .from('clients')
+      .update({ reenganche_sent_at: new Date().toISOString() })
+      .eq('id', clientId);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ─── Endpoint: estado de reenganche de clientes ───────────────────────────────
+// El frontend consulta esto para saber qué clientes ya recibieron reenganche
+// y durante cuántos días bloquear el botón.
+app.get('/reenganche-status', async (req, res) => {
+  const { blockDays = 30 } = req.query;
+  const since = new Date();
+  since.setDate(since.getDate() - Number(blockDays));
+
+  const { data, error } = await supabase
+    .from('clients')
+    .select('id, reenganche_sent_at')
+    .not('reenganche_sent_at', 'is', null)
+    .gte('reenganche_sent_at', since.toISOString());
+
+  if (error) return res.status(500).json({ success: false, error: error.message });
+
+  const sentIds = (data || []).map(c => c.id);
+  res.json({ success: true, sentIds });
+});
+
 // ─── Webhook Meta/WhatsApp ────────────────────────────────────────────────────
 
 app.get('/webhook', (req, res) => {
@@ -395,23 +403,6 @@ app.post('/webhook', async (req, res) => {
     const entry    = req.body.entry?.[0];
     const changes  = entry?.changes?.[0];
     const value    = changes?.value;
-
-    // ══════════════════════════════════════════════════════════════════════════
-    // ESTADOS DE ENTREGA (sent / delivered / read / failed)
-    // Meta manda esto en payloads SEPARADOS de los mensajes entrantes — si no se
-    // procesa aquí, no hay forma de saber por qué un envío "exitoso" nunca llegó.
-    // ══════════════════════════════════════════════════════════════════════════
-    const statuses = value?.statuses;
-    if (statuses?.length) {
-      for (const s of statuses) {
-        if (s.status === 'failed') {
-          console.error(`❌ ENTREGA FALLIDA — wamid ${s.id} a ${s.recipient_id}:`, JSON.stringify(s.errors));
-        } else {
-          console.log(`📬 Estado wamid ${s.id} → ${s.recipient_id}: ${s.status}`);
-        }
-      }
-    }
-
     const messages = value?.messages;
     if (!messages?.length) return;
 
@@ -419,7 +410,7 @@ app.post('/webhook', async (req, res) => {
     const from = msg.from;
 
     // ══════════════════════════════════════════════════════════════════════════
-    // RESPUESTAS DE BOTONES DE PLANTILLA (interactive)
+    // BOTONES DE PLANTILLA (interactive)
     // ══════════════════════════════════════════════════════════════════════════
     if (msg.type === 'interactive') {
       const buttonReply = msg.interactive?.button_reply;
@@ -442,7 +433,6 @@ app.post('/webhook', async (req, res) => {
           `✅ ¡Perfecto ${firstName}! Tu cita del *${cita.date}* a las *${cita.time}* con *${cita.barber_name ?? 'tu barbero'}* queda confirmada. ¡Te esperamos! 💈`
         );
         console.log(`✅ Cita ${cita.id} confirmada por botón para ${client.name}`);
-
       } else if (esCancelacion) {
         await supabase.from('appointments').update({ status: 'cancelada' }).eq('id', cita.id);
         await chakraSendSession(from,
@@ -450,11 +440,10 @@ app.post('/webhook', async (req, res) => {
         );
         console.log(`❌ Cita ${cita.id} cancelada por botón para ${client.name}`);
       }
-
       return;
     }
 
-    // Solo procesar mensajes de texto a partir de aquí
+    // Solo texto a partir de aquí
     if (msg.type !== 'text') return;
 
     const text      = msg.text.body.trim();
@@ -466,26 +455,21 @@ app.post('/webhook', async (req, res) => {
     // ══════════════════════════════════════════════════════════════════════════
     const state = conversationState[from];
 
-    // Cancelar flujo en cualquier momento
     if (state && ['cancelar', 'salir', 'cancel', 'exit'].some(k => textLower.includes(k))) {
       delete conversationState[from];
       const { client } = await getClienteYCita(from);
-      const firstName = client?.name?.split(' ')[0] || 'amigo';
-      await chakraSendSession(from, `Ok ${firstName}, cancelé el proceso. Escríbeme *hola* cuando quieras agendar. 👍`);
+      await chakraSendSession(from, `Ok ${client?.name?.split(' ')[0] || 'amigo'}, cancelé el proceso. Escríbeme *hola* cuando quieras agendar. 👍`);
       return;
     }
 
-    // ── Paso 2: cliente eligió barbero y hora ────────────────────────────────
     if (state?.step === 'esperando_seleccion') {
       const match = text.match(/([a-záéíóúñA-ZÁÉÍÓÚÑ\s]+)\s+(\d{1,2}:\d{2})/i);
       if (!match) {
-        await chakraSendSession(from,
-          `No entendí tu selección 😅\nEscríbeme así: _Nombre del barbero_ seguido de la hora.\nEj: *Giovanni 15:00*\n\nO escribe *cancelar* para salir.`
-        );
+        await chakraSendSession(from, `No entendí tu selección 😅\nEscríbeme así: _Nombre del barbero_ seguido de la hora.\nEj: *Giovanni 15:00*\n\nO escribe *cancelar* para salir.`);
         return;
       }
 
-      const nombreBuscado = match[1].trim().toLowerCase();
+      const nombreBuscado  = match[1].trim().toLowerCase();
       const horaSolicitada = match[2].padStart(5, '0');
 
       const { data: barberos } = await supabase.from('barbers').select('id, name').eq('active', true);
@@ -497,9 +481,7 @@ app.post('/webhook', async (req, res) => {
 
       const slotsLibres = await getSlotsLibres(barbero.id, state.fecha);
       if (!slotsLibres.includes(horaSolicitada)) {
-        await chakraSendSession(from,
-          `😔 Ese horario ya no está disponible con *${barbero.name}*.\nEscribe *hola* para ver los horarios actualizados.`
-        );
+        await chakraSendSession(from, `😔 Ese horario ya no está disponible con *${barbero.name}*.\nEscribe *hola* para ver los horarios actualizados.`);
         delete conversationState[from];
         return;
       }
@@ -509,14 +491,10 @@ app.post('/webhook', async (req, res) => {
 
       conversationState[from] = {
         step: 'confirmando',
-        barberoId:   barbero.id,
-        barberoName: barbero.name,
-        fecha:       state.fecha,
-        fechaLabel:  state.fechaLabel,
-        hora:        horaSolicitada,
-        clientId:    client?.id,
-        clientName:  client?.name || 'Cliente',
-        clientPhone: digits10,
+        barberoId: barbero.id, barberoName: barbero.name,
+        fecha: state.fecha, fechaLabel: state.fechaLabel,
+        hora: horaSolicitada,
+        clientId: client?.id, clientName: client?.name || 'Cliente', clientPhone: digits10,
       };
 
       await chakraSendSession(from,
@@ -529,7 +507,6 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // ── Paso 3: confirmación final de agendado ───────────────────────────────
     if (state?.step === 'confirmando') {
       const confirma = ['sí', 'si', 'yes', 'confirmo', 'ok', '1', '✅'].some(k => textLower.includes(k));
       const cancela  = ['no', 'cancelar', 'cancel', '2'].some(k => textLower.includes(k));
@@ -542,19 +519,11 @@ app.post('/webhook', async (req, res) => {
         })();
 
         const { error } = await supabase.from('appointments').insert([{
-          client_id:        state.clientId || null,
-          client_name:      state.clientName,
-          client_phone:     state.clientPhone,
-          barber_id:        state.barberoId,
-          barber_name:      state.barberoName,
-          date:             state.fecha,
-          time:             state.hora,
-          status:           'pendiente',
-          whatsapp_sent:    true,
-          reminder_sent:    false,
-          duration_minutes: 60,
-          end_time:         endTime,
-          notes:            'Agendado por WhatsApp',
+          client_id: state.clientId || null, client_name: state.clientName, client_phone: state.clientPhone,
+          barber_id: state.barberoId, barber_name: state.barberoName,
+          date: state.fecha, time: state.hora, status: 'pendiente',
+          whatsapp_sent: true, reminder_sent: false, duration_minutes: 60,
+          end_time: endTime, notes: 'Agendado por WhatsApp',
         }]);
 
         delete conversationState[from];
@@ -567,13 +536,8 @@ app.post('/webhook', async (req, res) => {
 
         console.log(`✅ Cita agendada vía WhatsApp: ${state.clientName} con ${state.barberoName} el ${state.fecha} a las ${state.hora}`);
         await chakraSendSession(from,
-          `✅ ¡Listo! Tu cita quedó agendada:\n\n` +
-          `👤 *${state.barberoName}*\n` +
-          `📅 *${state.fechaLabel}*\n` +
-          `🕐 *${state.hora}*\n\n` +
-          `Te esperamos en Imperium Caesar's Barber Club 💈`
+          `✅ ¡Listo! Tu cita quedó agendada:\n\n👤 *${state.barberoName}*\n📅 *${state.fechaLabel}*\n🕐 *${state.hora}*\n\nTe esperamos en Imperium Caesar's Barber Club 💈`
         );
-
       } else if (cancela) {
         delete conversationState[from];
         await chakraSendSession(from, `Entendido, cancelé el proceso. Escríbeme *hola* cuando quieras agendar 👍`);
@@ -584,36 +548,41 @@ app.post('/webhook', async (req, res) => {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // RESPUESTAS AUTOMÁTICAS GENERALES
+    // RESPUESTAS GENERALES
     // ══════════════════════════════════════════════════════════════════════════
 
-    // ── Respuesta a encuesta de satisfacción (texto libre, sin botones ni escala) ──
-    // Se revisa primero porque la plantilla invita a comentar libremente, y un
-    // comentario real puede incluir palabras como "gracias" u "hola" que de otro
-    // modo dispararían esas otras respuestas automáticas antes de tiempo.
+    // ── Encuesta pendiente (va primero para no confundirse con "gracias") ─────
     const encuestaPendiente = await getEncuestaPendiente(from);
     if (encuestaPendiente) {
       const { client: clienteEncuesta } = await getClienteYCita(from);
       const firstNameEncuesta = clienteEncuesta?.name?.split(' ')[0] || 'amigo';
-
       await supabase.from('appointments').update({
         survey_feedback: text,
         survey_responded_at: new Date().toISOString(),
       }).eq('id', encuestaPendiente.id);
-
       await chakraSendSession(from,
         `¡Muchas gracias por contarnos, ${firstNameEncuesta}! 🙏 Tomamos en cuenta tu comentario para seguir mejorando.`
       );
-      console.log(`⭐ Encuesta de cita ${encuestaPendiente.id} respondida por ${clienteEncuesta?.name ?? from}`);
+      console.log(`⭐ Encuesta respondida: cita ${encuestaPendiente.id}`);
       return;
     }
 
-    // ── Gracias ──────────────────────────────────────────────────────────────
+    // ── Gracias ───────────────────────────────────────────────────────────────
     const esGracias = ['gracias', 'muchas gracias', 'thank', 'thanks', '🙏'].some(k => textLower.includes(k));
     if (esGracias) {
       const { client } = await getClienteYCita(from);
-      const firstName = client?.name?.split(' ')[0] || 'amigo';
-      await chakraSendSession(from, `¡Con gusto${firstName}! ¿Hay algo más en lo que te pueda ayudar?`);
+      await chakraSendSession(from, `¡Con gusto ${client?.name?.split(' ')[0] || ''}! 😊 ¿Hay algo más en lo que te pueda ayudar?`);
+      return;
+    }
+
+    // ── Mensaje largo o pregunta compleja → derivar a humano ─────────────────
+    // ⚠️ Este bloque va ANTES de esHola/esAgendar para que un mensaje largo
+    // como "hola quería saber si tienen disponibilidad para este fin de semana
+    // porque necesito cortarme el cabello y..." no dispare la agenda automática.
+    const esMensajeLargo   = text.length > 80;
+    const esPreguntaComple = (text.match(/\?/g) || []).length > 1 || (text.length > 50 && text.includes('?'));
+    if (esMensajeLargo || esPreguntaComple) {
+      await chakraSendSession(from, `Hola 👋 Recibimos tu mensaje. Un momento, pronto te atendemos personalmente. 💈`);
       return;
     }
 
@@ -625,7 +594,6 @@ app.post('/webhook', async (req, res) => {
       const { client } = await getClienteYCita(from);
       const firstName = client?.name?.split(' ')[0] || 'amigo';
 
-      // Calcular primer día disponible para el estado de conversación
       const nextDays = getNextDays(4);
       const { data: barberos } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
       let primerDia = null;
@@ -633,76 +601,47 @@ app.post('/webhook', async (req, res) => {
         const dayName = DAY_MAP[day.getDay()];
         const tieneBarbe = barberos?.some(b => {
           const schedule = Array.isArray(b.schedule) ? b.schedule : [];
-          return schedule.some(d =>
-            d.replace('á','a').replace('é','e') === dayName.replace('á','a').replace('é','e')
-          );
+          return schedule.some(d => d.replace('á','a').replace('é','e') === dayName.replace('á','a').replace('é','e'));
         });
         if (tieneBarbe) { primerDia = day; break; }
       }
 
       if (primerDia) {
-        conversationState[from] = {
-          step:       'esperando_seleccion',
-          fecha:      toYMD(primerDia),
-          fechaLabel: formatDateMX(primerDia),
-        };
+        conversationState[from] = { step: 'esperando_seleccion', fecha: toYMD(primerDia), fechaLabel: formatDateMX(primerDia) };
       }
 
       const disponibilidadMsg = await buildDisponibilidadMsg();
-      await chakraSendSession(from,
-        `¡Hola ${firstName}! 👋 Bienvenido a *Imperium Caesar's Barber Club* 💈\n\n${disponibilidadMsg}`
-      );
+      await chakraSendSession(from, `¡Hola ${firstName}! 👋 Bienvenido a *Imperium Caesar's Barber Club* 💈\n\n${disponibilidadMsg}`);
       return;
-      // ── Mensaje largo o pregunta compleja = derivar a humano ─────────────────────
-      const esMensajeLargo   = text.length > 80;
-      const esPreguntaComple = (text.match(/\?/g) || []).length > 1 || text.length > 50 && text.includes('?');
-
-      if (esMensajeLargo || esPreguntaComple) {
-        await chakraSendSession(from,
-          `Hola 👋 Recibimos tu mensaje. Un momento, pronto te atendemos personalmente. 💈`
-        );
-        return;
-      }
     }
 
-    // ── Confirmación / cancelación de cita existente por texto ───────────────
+    // ── Confirmación / cancelación de cita existente ──────────────────────────
     const { client, cita } = await getClienteYCita(from);
     const firstName = client?.name?.split(' ')[0] || 'amigo';
 
     if (!client) {
-      await chakraSendSession(from,
-        `¡Hola! 👋 No encontramos tu número en nuestro sistema.\nEscribe *hola* para ver horarios disponibles. 💈`
-      );
+      await chakraSendSession(from, `¡Hola! 👋 No encontramos tu número en nuestro sistema.\nEscribe *hola* para ver horarios disponibles. 💈`);
       return;
     }
-
-    // ── Respuesta a encuesta de satisfacción ──────────────────────────────────
-    // (este caso ya se atendió más arriba, antes del bloque de "Gracias")
 
     const esConfirmacion = ['sí, confirmo', 'sí', 'si', 'confirmo', 'confirmar', '1', 'yes', 'ok', '✅'].some(k => textLower.includes(k));
     const esCancelacion  = ['no puedo asistir', 'no', 'cancelar', 'cancelo', 'cancel', '2', 'cancelación'].some(k => textLower.includes(k));
 
     if (!cita) {
-      await chakraSendSession(from,
-        `Hola ${firstName} 👋 No tienes citas próximas.\n\nEscribe *hola* para ver horarios y agendar una cita. 💈`
-      );
+      await chakraSendSession(from, `Hola ${firstName} 👋 No tienes citas próximas.\n\nEscribe *hola* para ver horarios y agendar una cita. 💈`);
       return;
     }
 
     if (esConfirmacion && cita.status !== 'confirmada') {
       await supabase.from('appointments').update({ status: 'confirmada' }).eq('id', cita.id);
-      await chakraSendSession(from,
-        `✅ ¡Perfecto ${firstName}! Tu cita del *${cita.date}* a las *${cita.time}* con *${cita.barber_name ?? 'tu barbero'}* queda confirmada. ¡Te esperamos! 💈`
-      );
+      await chakraSendSession(from, `✅ ¡Perfecto ${firstName}! Tu cita del *${cita.date}* a las *${cita.time}* con *${cita.barber_name ?? 'tu barbero'}* queda confirmada. ¡Te esperamos! 💈`);
       console.log(`✅ Cita ${cita.id} confirmada para ${client.name}`);
       return;
     }
 
     if (esCancelacion) {
       await supabase.from('appointments').update({ status: 'cancelada' }).eq('id', cita.id);
-      await chakraSendSession(from,
-        `❌ Entendido ${firstName}, tu cita del *${cita.date}* ha sido cancelada. Si quieres reagendar escribe *hola* cuando gustes 🙌`
-      );
+      await chakraSendSession(from, `❌ Entendido ${firstName}, tu cita del *${cita.date}* ha sido cancelada. Si quieres reagendar escribe *hola* cuando gustes 🙌`);
       console.log(`❌ Cita ${cita.id} cancelada para ${client.name}`);
       return;
     }
@@ -753,28 +692,29 @@ app.get('/test-disponibilidad', async (req, res) => {
   res.json({ mensaje: msg });
 });
 
-app.get('/run-reminders', async (req, res) => {
-  console.log('🔔 Recordatorios disparados externamente');
-  enviarRecordatorios('EXTERNO').catch(console.error);
-  res.json({ success: true, message: 'Recordatorios iniciados' });
-});
-
 app.get('/test-encuestas', async (req, res) => {
   const yesterday = new Date();
   yesterday.setDate(yesterday.getDate() - 1);
   const yesterdayStr = yesterday.toISOString().slice(0, 10);
   const { data: citas, error } = await supabase
     .from('appointments')
-    .select('id, date, status, client_name, client_phone, survey_sent, survey_responded_at')
+    .select('id, date, status, client_name, client_phone, survey_sent')
     .eq('date', yesterdayStr);
   res.json({
     serverTime: new Date().toISOString(),
     ayerBuscado: yesterdayStr,
     citasEncontradas: citas?.length ?? 0,
-    pendientesDeEncuesta: citas?.filter(c => c.status === 'confirmada' && !c.survey_sent).length ?? 0,
+    // ✅ Ahora incluye pendiente Y confirmada (antes solo confirmada)
+    pendientesDeEncuesta: citas?.filter(c => ['pendiente','confirmada'].includes(c.status) && !c.survey_sent).length ?? 0,
     citas: citas ?? [],
     error: error?.message ?? null,
   });
+});
+
+app.get('/run-reminders', async (req, res) => {
+  console.log('🔔 Recordatorios disparados externamente');
+  enviarRecordatorios('EXTERNO').catch(console.error);
+  res.json({ success: true, message: 'Recordatorios iniciados' });
 });
 
 app.get('/run-encuestas', async (req, res) => {
@@ -783,32 +723,22 @@ app.get('/run-encuestas', async (req, res) => {
   res.json({ success: true, message: 'Encuestas iniciadas' });
 });
 
-// ─── Endpoint temporal de debug: manda una plantilla a cualquier número ──────
-// ⚠️ Quítalo (o protégelo) cuando termines de depurar — no tiene autenticación
-// y cualquiera con la URL podría usarlo para mandar plantillas a quien sea.
-// Uso: /test-send?to=5212221234567&template=barberia_reenganche&vars=Mariana
 app.get('/test-send', async (req, res) => {
   const { to, template = 'barberia_reenganche', vars = 'Cliente' } = req.query;
   if (!to) return res.status(400).json({ success: false, error: 'Falta ?to=52XXXXXXXXXX' });
-
   const variables = String(vars).split(',').map(v => v.trim());
-
   try {
     await chakraSendTemplate(to, template, variables);
     res.json({ success: true, to: normalizePhone(to), template, variables });
   } catch (error) {
     const status = error.response?.status ?? 500;
     const metaError = error.response?.data?.error;
-    const errMsg = metaError?.message
-      || error.response?.data?._errors?.join('; ')
-      || error.response?.data?.message
-      || error.message;
-    console.error('❌ test-send:', JSON.stringify(error.response?.data ?? errMsg));
+    const errMsg = metaError?.message || error.response?.data?._errors?.join('; ') || error.message;
     res.status(status).json({ success: false, error: errMsg });
   }
 });
 
-// ─── Función compartida de recordatorios ─────────────────────────────────────
+// ─── Recordatorios 24h ───────────────────────────────────────────────────────
 
 async function enviarRecordatorios(etiqueta = '') {
   const tomorrow = new Date();
@@ -844,20 +774,20 @@ async function enviarRecordatorios(etiqueta = '') {
   }
 }
 
-// ─── Función compartida de encuestas de satisfacción ─────────────────────────
-// Se manda 1 día después de la fecha de la cita, solo si la cita quedó
-// confirmada (no si fue cancelada, ni si nunca se confirmó).
+// ─── Encuestas post-servicio ──────────────────────────────────────────────────
+// ✅ FIX: ahora incluye citas 'pendiente' Y 'confirmada' (no solo confirmada)
+// porque muchos clientes asisten sin haber respondido el recordatorio.
 async function enviarEncuestas(etiqueta = '') {
   const yesterday = new Date();
   yesterday.setDate(yesterday.getDate() - 1);
   const yesterdayStr = yesterday.toISOString().slice(0, 10);
-  console.log(`⭐ [${etiqueta}] Enviando encuestas de satisfacción para citas del ${yesterdayStr}...`);
+  console.log(`⭐ [${etiqueta}] Enviando encuestas para citas del ${yesterdayStr}...`);
 
   const { data: citas, error } = await supabase
     .from('appointments')
     .select('id, date, status, client_name, client_phone, survey_sent')
     .eq('date', yesterdayStr)
-    .eq('status', 'confirmada')
+    .in('status', ['pendiente', 'confirmada'])   // ✅ ambos status
     .or('survey_sent.is.null,survey_sent.eq.false');
 
   if (error) { console.error(`❌ [${etiqueta}] Error:`, error.message); return; }
@@ -868,7 +798,6 @@ async function enviarEncuestas(etiqueta = '') {
   for (const cita of citas) {
     if (!cita.client_phone) { console.warn(`⚠️ Cita ${cita.id} sin teléfono`); continue; }
     try {
-      // Plantilla con 2 variables: {{1}} nombre  {{2}} fecha de la cita
       await chakraSendTemplate(cita.client_phone, 'barberia_encuesta_servicio', [
         cita.client_name?.split(' ')[0] ?? 'Cliente',
         formatFechaCorta(cita.date),
@@ -885,19 +814,21 @@ async function enviarEncuestas(etiqueta = '') {
   }
 }
 
-// ─── Cron matutino: 10:00 AM CDMX (16:00 UTC) ────────────────────────────────
+// ─── Crons ────────────────────────────────────────────────────────────────────
+
+// Recordatorio matutino: 10:00 AM CDMX (16:00 UTC)
 cron.schedule('0 16 * * *', () => {
   console.log('🌅 Cron matutino disparado');
   enviarRecordatorios('MAÑANA');
 });
 
-// ─── Cron nocturno: 6:00 PM CDMX (00:00 UTC) ────────────────────────────────
+// Recordatorio nocturno: 6:00 PM CDMX (00:00 UTC)
 cron.schedule('0 0 * * *', () => {
   console.log('🌙 Cron nocturno disparado');
   enviarRecordatorios('NOCHE');
 });
 
-// ─── Cron de encuestas: 11:00 AM CDMX (17:00 UTC) ────────────────────────────
+// Encuestas: 11:00 AM CDMX (17:00 UTC)
 cron.schedule('0 17 * * *', () => {
   console.log('⭐ Cron de encuestas disparado');
   enviarEncuestas('ENCUESTA');
