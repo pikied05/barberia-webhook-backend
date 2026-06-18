@@ -783,6 +783,31 @@ app.get('/run-encuestas', async (req, res) => {
   res.json({ success: true, message: 'Encuestas iniciadas' });
 });
 
+// ─── Endpoint temporal de debug: manda una plantilla a cualquier número ──────
+// ⚠️ Quítalo (o protégelo) cuando termines de depurar — no tiene autenticación
+// y cualquiera con la URL podría usarlo para mandar plantillas a quien sea.
+// Uso: /test-send?to=5212221234567&template=barberia_reenganche&vars=Mariana
+app.get('/test-send', async (req, res) => {
+  const { to, template = 'barberia_reenganche', vars = 'Cliente' } = req.query;
+  if (!to) return res.status(400).json({ success: false, error: 'Falta ?to=52XXXXXXXXXX' });
+
+  const variables = String(vars).split(',').map(v => v.trim());
+
+  try {
+    await chakraSendTemplate(to, template, variables);
+    res.json({ success: true, to: normalizePhone(to), template, variables });
+  } catch (error) {
+    const status = error.response?.status ?? 500;
+    const metaError = error.response?.data?.error;
+    const errMsg = metaError?.message
+      || error.response?.data?._errors?.join('; ')
+      || error.response?.data?.message
+      || error.message;
+    console.error('❌ test-send:', JSON.stringify(error.response?.data ?? errMsg));
+    res.status(status).json({ success: false, error: errMsg });
+  }
+});
+
 // ─── Función compartida de recordatorios ─────────────────────────────────────
 
 async function enviarRecordatorios(etiqueta = '') {
