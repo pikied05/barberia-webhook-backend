@@ -319,29 +319,30 @@ app.post('/chakra-send-image', async (req, res) => {
     const FormData = (await import('form-data')).default;
     const form = new FormData();
     form.append('file', imageBuffer, { filename: 'ticket.png', contentType: 'image/png' });
-    form.append('type', 'image/png');
-    form.append('messaging_product', 'whatsapp');
+    form.append('filename', 'ticket.png');
 
-    const uploadUrl = `${CHAKRA_API_URL}/v1/ext/plugin/whatsapp/${CHAKRA_PLUGIN_ID}/api/${WA_API_VERSION}/${CHAKRA_PHONE_ID}/media`;
+    // Endpoint real de Chakra para subir media (NO es el de la Graph API directa,
+    // por eso daba 404 "Not Found"). Esto regresa una URL pública, no un media_id.
+    const uploadUrl = `${CHAKRA_API_URL}/v1/ext/plugin/whatsapp/${CHAKRA_PLUGIN_ID}/upload-public-media`;
     const uploadRes = await axios.post(uploadUrl, form, {
       headers: { ...chakraHeaders(), ...form.getHeaders() },
       timeout: 30000,
     });
 
-    const mediaId = uploadRes.data?.id;
-    if (!mediaId) throw new Error('No se obtuvo media_id de Chakra');
+    const publicUrl = uploadRes.data?._data?.publicMediaUrl;
+    if (!publicUrl) throw new Error('No se obtuvo publicMediaUrl de Chakra');
 
     const msgUrl = `${CHAKRA_API_URL}/v1/ext/plugin/whatsapp/${CHAKRA_PLUGIN_ID}/api/${WA_API_VERSION}/${CHAKRA_PHONE_ID}/messages`;
     await axios.post(msgUrl, {
       messaging_product: 'whatsapp',
       to: normalizePhone(to),
       type: 'image',
-      image: { id: mediaId, caption: caption || '🎫 Ticket de venta' },
+      image: { link: publicUrl, caption: caption || '🎫 Ticket de venta' },
     }, { headers: chakraHeaders(), timeout: 15000 });
 
     return res.json({ success: true });
   } catch (error) {
-    console.error('❌ chakra-send-image:', error.response?.data || error.message);
+    console.error('❌ chakra-send-image:', JSON.stringify(error.response?.data ?? error.message));
     return res.status(500).json({ success: false, error: error.response?.data?.message || error.message });
   }
 });
@@ -353,12 +354,23 @@ app.post('/reenganche-sent', async (req, res) => {
   const { clientId } = req.body;
   if (!clientId) return res.status(400).json({ success: false, error: 'Falta clientId' });
   try {
-    await supabase
+    const { error, data } = await supabase
       .from('clients')
       .update({ reenganche_sent_at: new Date().toISOString() })
-      .eq('id', clientId);
+      .eq('id', clientId)
+      .select();
+    if (error) {
+      // Antes esto se ignoraba y siempre se regresaba success:true aunque
+      // la columna no existiera o el update fallara — por eso no bloqueaba al refrescar.
+      console.error('❌ /reenganche-sent — no se pudo guardar:', error.message);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+    if (!data?.length) {
+      console.warn(`⚠️ /reenganche-sent — no se encontró cliente con id ${clientId}`);
+    }
     res.json({ success: true });
   } catch (err) {
+    console.error('❌ /reenganche-sent:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
