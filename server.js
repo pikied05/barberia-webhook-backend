@@ -51,6 +51,13 @@ const TEMPLATE_LANGUAGE_CANDIDATES = {
 
 function normalizePhone(raw = '') {
   let p = raw.replace(/\s+/g, '').replace(/^00/, '').replace(/^\+/, '');
+  // Algunas integraciones viejas (Twilio, 360dialog, API on-premise) guardaban
+  // los números de México como 521 + 10 dígitos. La Cloud API oficial de Meta
+  // NO reconoce ese "1" extra y regresa "Message undeliverable" (131026) aunque
+  // el número sí tenga WhatsApp. Lo quitamos antes de mandar.
+  if (p.startsWith('521') && p.length === 13) {
+    p = '52' + p.slice(3);
+  }
   if (p.length === 10 && !p.startsWith('52')) p = '52' + p;
   return p;
 }
@@ -859,8 +866,8 @@ cron.schedule('0 16 * * *', () => {
   enviarRecordatorios('MAÑANA');
 });
 
-// ─── Cron nocturno: 6:00 PM CDMX (23:00 UTC) ────────────────────────────────
-cron.schedule('0 23 * * *', () => {
+// ─── Cron nocturno: 6:00 PM CDMX (00:00 UTC) ────────────────────────────────
+cron.schedule('0 0 * * *', () => {
   console.log('🌙 Cron nocturno disparado');
   enviarRecordatorios('NOCHE');
 });
