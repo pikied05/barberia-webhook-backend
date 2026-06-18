@@ -77,7 +77,7 @@ async function chakraSendTemplate(to, templateName, variables) {
   let ultimoError;
   for (const lang of candidatos) {
     try {
-      await axios.post(url, {
+      const resp = await axios.post(url, {
         messaging_product: 'whatsapp',
         to: normalizePhone(to),
         type: 'template',
@@ -91,9 +91,8 @@ async function chakraSendTemplate(to, templateName, variables) {
         },
       }, { headers: chakraHeaders(), timeout: 15000 });
 
-      if (lang !== candidatos[0]) {
-        console.log(`ℹ️ Plantilla "${templateName}" se mandó con idioma "${lang}" (no era el primero en la lista — considera reordenar TEMPLATE_LANGUAGE_CANDIDATES).`);
-      }
+      const wamid = resp.data?.messages?.[0]?.id;
+      console.log(`✅ Plantilla "${templateName}" aceptada por Meta (idioma "${lang}") — wamid: ${wamid}`);
       return; // éxito, ya no probamos más candidatos
     } catch (error) {
       ultimoError = error;
@@ -389,6 +388,23 @@ app.post('/webhook', async (req, res) => {
     const entry    = req.body.entry?.[0];
     const changes  = entry?.changes?.[0];
     const value    = changes?.value;
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // ESTADOS DE ENTREGA (sent / delivered / read / failed)
+    // Meta manda esto en payloads SEPARADOS de los mensajes entrantes — si no se
+    // procesa aquí, no hay forma de saber por qué un envío "exitoso" nunca llegó.
+    // ══════════════════════════════════════════════════════════════════════════
+    const statuses = value?.statuses;
+    if (statuses?.length) {
+      for (const s of statuses) {
+        if (s.status === 'failed') {
+          console.error(`❌ ENTREGA FALLIDA — wamid ${s.id} a ${s.recipient_id}:`, JSON.stringify(s.errors));
+        } else {
+          console.log(`📬 Estado wamid ${s.id} → ${s.recipient_id}: ${s.status}`);
+        }
+      }
+    }
+
     const messages = value?.messages;
     if (!messages?.length) return;
 
@@ -843,7 +859,7 @@ cron.schedule('0 16 * * *', () => {
   enviarRecordatorios('MAÑANA');
 });
 
-// ─── Cron nocturno: 6:00 PM CDMX (00:00 UTC) ────────────────────────────────
+// ─── Cron nocturno: 6:00 PM CDMX (23:00 UTC) ────────────────────────────────
 cron.schedule('0 23 * * *', () => {
   console.log('🌙 Cron nocturno disparado');
   enviarRecordatorios('NOCHE');
