@@ -403,6 +403,23 @@ app.post('/webhook', async (req, res) => {
     const entry    = req.body.entry?.[0];
     const changes  = entry?.changes?.[0];
     const value    = changes?.value;
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // ESTADOS DE ENTREGA (sent / delivered / read / failed)
+    // Meta manda esto en payloads SEPARADOS de los mensajes entrantes — si no se
+    // procesa aquí, no hay forma de saber por qué un envío "exitoso" nunca llegó.
+    // ══════════════════════════════════════════════════════════════════════════
+    const statuses = value?.statuses;
+    if (statuses?.length) {
+      for (const s of statuses) {
+        if (s.status === 'failed') {
+          console.error(`❌ ENTREGA FALLIDA — wamid ${s.id} a ${s.recipient_id}:`, JSON.stringify(s.errors));
+        } else {
+          console.log(`📬 Estado wamid ${s.id} → ${s.recipient_id}: ${s.status}`);
+        }
+      }
+    }
+
     const messages = value?.messages;
     if (!messages?.length) return;
 
@@ -787,7 +804,7 @@ async function enviarEncuestas(etiqueta = '') {
     .from('appointments')
     .select('id, date, status, client_name, client_phone, survey_sent')
     .eq('date', yesterdayStr)
-    .in('status', ['pendiente', 'confirmada'])   // ✅ ambos status
+    .in('status', ['pendiente', 'confirmada', 'completada'])   // ✅ ambos status
     .or('survey_sent.is.null,survey_sent.eq.false');
 
   if (error) { console.error(`❌ [${etiqueta}] Error:`, error.message); return; }
@@ -822,8 +839,8 @@ cron.schedule('0 16 * * *', () => {
   enviarRecordatorios('MAÑANA');
 });
 
-// Recordatorio nocturno: 6:00 PM CDMX (00:00 UTC)
-cron.schedule('0 0 * * *', () => {
+// Recordatorio nocturno: 5:00 PM CDMX (23:00 UTC)
+cron.schedule('0 23 * * *', () => {
   console.log('🌙 Cron nocturno disparado');
   enviarRecordatorios('NOCHE');
 });
