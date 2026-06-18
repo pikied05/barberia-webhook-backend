@@ -33,6 +33,19 @@ const chakraHeaders = () => ({
   'Content-Type': 'application/json',
 });
 
+// ─── Idioma aprobado en Meta por cada plantilla ───────────────────────────────
+// ⚠️ No todas las plantillas se aprobaron en el mismo idioma. Verifica en Meta
+// (WhatsApp Manager → Plantillas de mensajes → columna "Idioma") el código real
+// de cada una si alguna te sigue dando 400.
+const TEMPLATE_LANGUAGES = {
+  barberia_ticket_venta:      'es_MX',
+  barberia_recordatorio_24h:  'es_MX',
+  barberia_confirmacion_cita: 'es_MX',
+  barberia_encuesta_servicio: 'es_MX',
+  barberia_cupon_lealtad:     'es_MX',
+  barberia_reenganche:        'en_US', // ⚠️ confirmar: la plantilla está aprobada en inglés
+};
+
 // ─── Helpers de Chakra ────────────────────────────────────────────────────────
 
 function normalizePhone(raw = '') {
@@ -59,7 +72,7 @@ async function chakraSendTemplate(to, templateName, variables) {
     type: 'template',
     template: {
       name: templateName,
-      language: { code: 'es_MX' },
+      language: { code: TEMPLATE_LANGUAGES[templateName] || 'es_MX' },
       components: variables.length > 0 ? [{
         type: 'body',
         parameters: variables.map(v => ({ type: 'text', text: String(v) })),
@@ -280,9 +293,11 @@ app.post('/chakra-send-template', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     const status = error.response?.status ?? 500;
-    const errMsg = error.response?.data?.message || error.message;
-    console.error('❌ chakra-send-template:', errMsg);
-    res.status(status).json({ success: false, error: errMsg });
+    // Meta anida el detalle real en response.data.error.message, no en response.data.message.
+    const metaError = error.response?.data?.error;
+    const errMsg = metaError?.message || error.response?.data?.message || error.message;
+    console.error('❌ chakra-send-template:', JSON.stringify(error.response?.data ?? errMsg));
+    res.status(status).json({ success: false, error: errMsg, metaCode: metaError?.code, metaSubcode: metaError?.error_subcode });
   }
 });
 
@@ -801,8 +816,8 @@ cron.schedule('0 16 * * *', () => {
   enviarRecordatorios('MAÑANA');
 });
 
-// ─── Cron nocturno: 6:00 PM CDMX (00:00 UTC) ────────────────────────────────
-cron.schedule('0 0 * * *', () => {
+// ─── Cron nocturno: 5:00 PM CDMX (23:00 UTC) ────────────────────────────────
+cron.schedule('0 23 * * *', () => {
   console.log('🌙 Cron nocturno disparado');
   enviarRecordatorios('NOCHE');
 });
