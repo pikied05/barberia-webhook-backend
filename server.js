@@ -33,17 +33,18 @@ const chakraHeaders = () => ({
   'Content-Type': 'application/json',
 });
 
-// ─── Idioma aprobado en Meta por cada plantilla ───────────────────────────────
-// ⚠️ No todas las plantillas se aprobaron en el mismo idioma. Verifica en Meta
-// (WhatsApp Manager → Plantillas de mensajes → columna "Idioma") el código real
-// de cada una si alguna te sigue dando 400.
-const TEMPLATE_LANGUAGES = {
-  barberia_ticket_venta:      'es_MX',
-  barberia_recordatorio_24h:  'es_MX',
-  barberia_confirmacion_cita: 'es_MX',
-  barberia_encuesta_servicio: 'es_MX',
-  barberia_cupon_lealtad:     'es_MX',
-  barberia_reenganche:        'en_US', // ⚠️ confirmar: la plantilla está aprobada en inglés
+// ─── Idioma(s) aprobado(s) en Meta por cada plantilla ─────────────────────────
+// ⚠️ No todas las plantillas se aprobaron en el mismo idioma. Si el primer
+// candidato falla por error 132001 ("Template name does not exist in the
+// translation"), chakraSendTemplate prueba automáticamente el siguiente.
+const TEMPLATE_LANGUAGE_CANDIDATES = {
+  barberia_ticket_venta:      ['es_MX'],
+  barberia_recordatorio_24h:  ['es_MX'],
+  barberia_confirmacion_cita: ['es_MX'],
+  barberia_encuesta_servicio: ['es_MX'],
+  barberia_cupon_lealtad:     ['es_MX'],
+  // es_MX y en_US ya se descartaron para esta plantilla (error 132001 en ambos)
+  barberia_reenganche:        ['en', 'en_GB', 'en_US', 'es_MX'],
 };
 
 // ─── Helpers de Chakra ────────────────────────────────────────────────────────
@@ -64,21 +65,43 @@ async function chakraSendSession(to, message) {
   }, { headers: chakraHeaders(), timeout: 15000 });
 }
 
+function esErrorDeIdioma(error) {
+  const dataStr = JSON.stringify(error.response?.data ?? '');
+  return dataStr.includes('132001') || error.response?.data?.error?.code === 132001;
+}
+
 async function chakraSendTemplate(to, templateName, variables) {
   const url = `${CHAKRA_API_URL}/v1/ext/plugin/whatsapp/${CHAKRA_PLUGIN_ID}/api/${WA_API_VERSION}/${CHAKRA_PHONE_ID}/messages`;
-  await axios.post(url, {
-    messaging_product: 'whatsapp',
-    to: normalizePhone(to),
-    type: 'template',
-    template: {
-      name: templateName,
-      language: { code: TEMPLATE_LANGUAGES[templateName] || 'es_MX' },
-      components: variables.length > 0 ? [{
-        type: 'body',
-        parameters: variables.map(v => ({ type: 'text', text: String(v) })),
-      }] : [],
-    },
-  }, { headers: chakraHeaders(), timeout: 15000 });
+  const candidatos = TEMPLATE_LANGUAGE_CANDIDATES[templateName] || ['es_MX'];
+
+  let ultimoError;
+  for (const lang of candidatos) {
+    try {
+      await axios.post(url, {
+        messaging_product: 'whatsapp',
+        to: normalizePhone(to),
+        type: 'template',
+        template: {
+          name: templateName,
+          language: { code: lang },
+          components: variables.length > 0 ? [{
+            type: 'body',
+            parameters: variables.map(v => ({ type: 'text', text: String(v) })),
+          }] : [],
+        },
+      }, { headers: chakraHeaders(), timeout: 15000 });
+
+      if (lang !== candidatos[0]) {
+        console.log(`ℹ️ Plantilla "${templateName}" se mandó con idioma "${lang}" (no era el primero en la lista — considera reordenar TEMPLATE_LANGUAGE_CANDIDATES).`);
+      }
+      return; // éxito, ya no probamos más candidatos
+    } catch (error) {
+      ultimoError = error;
+      if (!esErrorDeIdioma(error)) throw error; // es otro tipo de error, no sigas probando idiomas
+      console.warn(`⚠️ Idioma "${lang}" no válido para "${templateName}" (132001), probando siguiente candidato...`);
+    }
+  }
+  throw ultimoError; // se agotaron los candidatos
 }
 
 // ─── Lógica de disponibilidad ─────────────────────────────────────────────────
@@ -293,9 +316,13 @@ app.post('/chakra-send-template', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     const status = error.response?.status ?? 500;
-    // Meta anida el detalle real en response.data.error.message, no en response.data.message.
+    // El error real puede venir como Graph API ({error:{message}}) o como lo
+    // envuelve Chakra ({_errors: ["..."]}). Probamos ambas formas.
     const metaError = error.response?.data?.error;
-    const errMsg = metaError?.message || error.response?.data?.message || error.message;
+    const errMsg = metaError?.message
+      || error.response?.data?._errors?.join('; ')
+      || error.response?.data?.message
+      || error.message;
     console.error('❌ chakra-send-template:', JSON.stringify(error.response?.data ?? errMsg));
     res.status(status).json({ success: false, error: errMsg, metaCode: metaError?.code, metaSubcode: metaError?.error_subcode });
   }
@@ -816,7 +843,7 @@ cron.schedule('0 16 * * *', () => {
   enviarRecordatorios('MAÑANA');
 });
 
-// ─── Cron nocturno: 5:00 PM CDMX (23:00 UTC) ────────────────────────────────
+// ─── Cron nocturno: 6:00 PM CDMX (00:00 UTC) ────────────────────────────────
 cron.schedule('0 23 * * *', () => {
   console.log('🌙 Cron nocturno disparado');
   enviarRecordatorios('NOCHE');
