@@ -347,6 +347,93 @@ app.post('/chakra-send-image', async (req, res) => {
   }
 });
 
+// ─── Diagnóstico de imagen ───────────────────────────────────────────────────
+// Prueba el flujo completo de imagen con logs detallados en cada paso
+app.post('/test-send-image', async (req, res) => {
+  try {
+    const { to, image, caption } = req.body;
+    if (!to || !image) return res.status(400).json({ success: false, error: 'Faltan to e image (base64)' });
+
+    const base64Data = image.replace(/^data:image\/\w+;base64,/, '');
+    const imageBuffer = Buffer.from(base64Data, 'base64');
+    const sizeMB = (imageBuffer.length / 1024 / 1024).toFixed(2);
+    console.log(`🖼️ Imagen recibida — tamaño: ${sizeMB} MB`);
+
+    if (imageBuffer.length > 5 * 1024 * 1024) {
+      return res.status(400).json({ success: false, error: `Imagen demasiado grande: ${sizeMB} MB (máx 5 MB)` });
+    }
+
+    // Paso 1: subir a Chakra
+    console.log('📤 Subiendo imagen a Chakra...');
+    const FormData = (await import('form-data')).default;
+    const form = new FormData();
+    form.append('file', imageBuffer, { filename: 'ticket.png', contentType: 'image/png' });
+    form.append('filename', 'ticket.png');
+
+    const uploadUrl = `${CHAKRA_API_URL}/v1/ext/plugin/whatsapp/${CHAKRA_PLUGIN_ID}/upload-public-media`;
+    let uploadRes;
+    try {
+      uploadRes = await axios.post(uploadUrl, form, {
+        headers: { ...chakraHeaders(), ...form.getHeaders() },
+        timeout: 30000,
+      });
+      console.log('✅ Upload response:', JSON.stringify(uploadRes.data));
+    } catch (uploadErr) {
+      console.error('❌ Upload falló:', JSON.stringify(uploadErr.response?.data ?? uploadErr.message));
+      return res.status(500).json({
+        success: false,
+        step: 'upload',
+        error: uploadErr.response?.data ?? uploadErr.message,
+      });
+    }
+
+    const publicUrl = uploadRes.data?._data?.publicMediaUrl;
+    if (!publicUrl) {
+      return res.status(500).json({
+        success: false,
+        step: 'upload',
+        error: 'No se obtuvo publicMediaUrl',
+        rawResponse: uploadRes.data,
+      });
+    }
+
+    console.log(`🔗 URL pública: ${publicUrl}`);
+
+    // Paso 2: enviar mensaje
+    console.log(`📱 Enviando imagen a ${normalizePhone(to)}...`);
+    const msgUrl = `${CHAKRA_API_URL}/v1/ext/plugin/whatsapp/${CHAKRA_PLUGIN_ID}/api/${WA_API_VERSION}/${CHAKRA_PHONE_ID}/messages`;
+    let msgRes;
+    try {
+      msgRes = await axios.post(msgUrl, {
+        messaging_product: 'whatsapp',
+        to: normalizePhone(to),
+        type: 'image',
+        image: { link: publicUrl, caption: caption || '🎫 Ticket de venta' },
+      }, { headers: chakraHeaders(), timeout: 15000 });
+      console.log('✅ Mensaje enviado:', JSON.stringify(msgRes.data));
+    } catch (msgErr) {
+      console.error('❌ Envío falló:', JSON.stringify(msgErr.response?.data ?? msgErr.message));
+      return res.status(500).json({
+        success: false,
+        step: 'send',
+        publicUrl,
+        error: msgErr.response?.data ?? msgErr.message,
+      });
+    }
+
+    return res.json({
+      success: true,
+      sizeMB,
+      publicUrl,
+      wamid: msgRes.data?.messages?.[0]?.id,
+    });
+
+  } catch (err) {
+    console.error('❌ test-send-image error:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ─── Endpoint: marcar reenganche enviado desde el frontend ───────────────────
 // El frontend llama este endpoint después de enviar el reenganche para que
 // quede registrado en Supabase y no se vuelva a mandar (ni al recargar).
@@ -722,9 +809,7 @@ app.get('/test-disponibilidad', async (req, res) => {
 });
 
 app.get('/test-encuestas', async (req, res) => {
-  // ✅ Calcular "ayer en México" (UTC-6)
-  const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
-  const yesterday = new Date(nowMX);
+  const yesterday = new Date();
   yesterday.setDate(yesterday.getDate() - 1);
   const yesterdayStr = yesterday.toISOString().slice(0, 10);
   const { data: citas, error } = await supabase
@@ -809,9 +894,7 @@ async function enviarRecordatorios(etiqueta = '') {
 // ✅ FIX: ahora incluye citas 'pendiente' Y 'confirmada' (no solo confirmada)
 // porque muchos clientes asisten sin haber respondido el recordatorio.
 async function enviarEncuestas(etiqueta = '') {
-  // ✅ Calcular "ayer en México" (UTC-6) para no adelantarse al día siguiente
-  const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
-  const yesterday = new Date(nowMX);
+  const yesterday = new Date();
   yesterday.setDate(yesterday.getDate() - 1);
   const yesterdayStr = yesterday.toISOString().slice(0, 10);
   console.log(`⭐ [${etiqueta}] Enviando encuestas para citas del ${yesterdayStr}...`);
