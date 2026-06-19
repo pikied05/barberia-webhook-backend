@@ -251,9 +251,13 @@ async function buildDisponibilidadMsg() {
 
   if (!hayDisponibilidad) return '😔 No hay horarios disponibles hoy. Escríbenos para buscar una fecha alternativa.';
 
+  // ✅ FIX 1: Indicar al cliente que puede poner solo la hora si no conoce al barbero
   msg += `
 ➡️ Responde con el *nombre del barbero* y la *hora*.
-Ej: _Giovanni 15:00_`;
+Ej: _Giovanni 15:00_
+
+💡 ¿No conoces a nuestros barberos? Solo manda la *hora* y nosotros te asignamos uno disponible.
+Ej: _15:00_ o _3 pm_`;
   return msg;
 }
 
@@ -519,7 +523,7 @@ app.post('/webhook', async (req, res) => {
     // 🔴 AUTOMATIZACIÓN DESACTIVADA TEMPORALMENTE
     // Cambiar AUTOMATION_ENABLED a true para reactivar el bot.
     // ══════════════════════════════════════════════════════════════════════════
-    const AUTOMATION_ENABLED = false;
+    const AUTOMATION_ENABLED = true;
     if (!AUTOMATION_ENABLED) {
       console.log(`⏸️ Automatización desactivada — mensaje de ${from} ignorado`);
       return;
@@ -627,19 +631,81 @@ app.post('/webhook', async (req, res) => {
     }
 
     if (state?.step === 'esperando_seleccion') {
-      const match = text.match(/([a-záéíóúñA-ZÁÉÍÓÚÑ\s]+)\s+(\d{1,2}:\d{2})/i);
-      if (!match) {
-        await chakraSendSession(from, `No entendí tu selección 😅\nEscríbeme así: _Nombre del barbero_ seguido de la hora.\nEj: *Giovanni 15:00*\n\nO escribe *cancelar* para salir.`);
+      // ✅ FIX 2 & 3: Detectar si el cliente mandó solo una hora (sin nombre de barbero)
+      // Soporta: "6 pm", "18 hrs", "18:00", "6:00 pm", "¿tendrás disponible 6 pm?"
+      const soloHoraMatch = text.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.?m\.?|p\.?m\.?|hrs?)?/i);
+      const matchNombreHora = text.match(/([a-záéíóúñA-ZÁÉÍÓÚÑ\s]+)\s+(\d{1,2}:\d{2})/i);
+
+      // Verificar que NO sea un nombre+hora antes de tratarlo como solo-hora
+      const esNombreYHora = !!matchNombreHora;
+
+      if (!esNombreYHora && soloHoraMatch) {
+        // El cliente mandó solo una hora — buscar barbero disponible automáticamente
+        let hour = parseInt(soloHoraMatch[1], 10);
+        const minutes = soloHoraMatch[2] ? parseInt(soloHoraMatch[2], 10) : 0;
+        const meridiano = soloHoraMatch[3]?.toLowerCase().replace(/\./g, '').replace('hrs', '').trim();
+        if (meridiano === 'pm' && hour < 12) hour += 12;
+        if (meridiano === 'am' && hour === 12) hour = 0;
+        // Si no tiene meridiano y la hora es < 10, asumir PM (rango de la barbería)
+        if (!meridiano && hour < 10) hour += 12;
+        const horaSolicitada = `${String(hour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+
+        // Verificar que la hora esté dentro del rango de la barbería
+        if (!ALL_SLOTS.includes(horaSolicitada)) {
+          await chakraSendSession(from,
+            `😅 La hora *${horaSolicitada}* no está en nuestro horario (10:00 – 19:30).\nDime otra hora o escribe *cancelar*.`
+          );
+          return;
+        }
+
+        const { data: barberos } = await supabase.from('barbers').select('id, name').eq('active', true);
+        const disponibles = [];
+        for (const barbero of (barberos || [])) {
+          const slotsLibres = await getSlotsLibres(barbero.id, state.fecha);
+          if (slotsLibres.includes(horaSolicitada)) disponibles.push(barbero);
+        }
+
+        if (!disponibles.length) {
+          await chakraSendSession(from,
+            `😔 A las *${horaSolicitada}* no tenemos a nadie libre el *${state.fechaLabel}*.\n` +
+            `¿Quieres intentar otra hora? Dímela, o escribe *cancelar*.`
+          );
+          return;
+        }
+
+        // ✅ Auto-asignar: tomar el primer barbero disponible
+        const barberoAsignado = disponibles[0];
+        const { client } = await getClienteYCita(from);
+        const digits10 = from.replace(/^52/, '').slice(-10);
+
+        conversationState[from] = {
+          step: 'confirmando',
+          barberoId: barberoAsignado.id, barberoName: barberoAsignado.name,
+          fecha: state.fecha, fechaLabel: state.fechaLabel,
+          hora: horaSolicitada,
+          clientId: client?.id, clientName: client?.name || 'Cliente', clientPhone: digits10,
+        };
+
+        await chakraSendSession(from,
+          `✅ ¡Perfecto! Te asignamos con *${barberoAsignado.name}* a las *${horaSolicitada}* el *${state.fechaLabel}*.\n\n` +
+          `📋 *Resumen de tu cita:*\n👤 Barbero: *${barberoAsignado.name}*\n📅 Fecha: *${state.fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n\n` +
+          `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
+        );
         return;
       }
 
-      const nombreBuscado  = match[1].trim().toLowerCase();
-      const horaSolicitada = match[2].padStart(5, '0');
+      if (!esNombreYHora) {
+        await chakraSendSession(from, `No entendí tu selección 😅\nEscríbeme así: _Nombre del barbero_ seguido de la hora.\nEj: *Giovanni 15:00*\n\n💡 O si no conoces a los barberos, solo manda la hora:\nEj: *15:00* o *3 pm*\n\nO escribe *cancelar* para salir.`);
+        return;
+      }
+
+      const nombreBuscado  = matchNombreHora[1].trim().toLowerCase();
+      const horaSolicitada = matchNombreHora[2].padStart(5, '0');
 
       const { data: barberos } = await supabase.from('barbers').select('id, name').eq('active', true);
       const barbero = barberos?.find(b => b.name.toLowerCase().includes(nombreBuscado));
       if (!barbero) {
-        await chakraSendSession(from, `No encontré al barbero "${match[1]}" 🤔\nRevisa el nombre e intenta de nuevo, o escribe *cancelar*.`);
+        await chakraSendSession(from, `No encontré al barbero "${matchNombreHora[1]}" 🤔\nRevisa el nombre e intenta de nuevo, o escribe *cancelar*.`);
         return;
       }
 
