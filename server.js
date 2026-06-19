@@ -523,7 +523,7 @@ app.post('/webhook', async (req, res) => {
     // 🔴 AUTOMATIZACIÓN DESACTIVADA TEMPORALMENTE
     // Cambiar AUTOMATION_ENABLED a true para reactivar el bot.
     // ══════════════════════════════════════════════════════════════════════════
-    const AUTOMATION_ENABLED = true;
+    const AUTOMATION_ENABLED = false;
     if (!AUTOMATION_ENABLED) {
       console.log(`⏸️ Automatización desactivada — mensaje de ${from} ignorado`);
       return;
@@ -928,8 +928,9 @@ app.post('/webhook', async (req, res) => {
         }
       }
 
-      // Número de día del mes: "el 21", "para el 25"
-      const numMatch = t.match(/\b(\d{1,2})\b/);
+      // Número de día del mes: "el 21", "para el 25", "día 15"
+      // Solo si va precedido de "el/dia/para" y NO seguido de am/pm/hrs (eso sería hora)
+      const numMatch = t.match(/(?:el|d[ií]a|para el)\s+(\d{1,2})(?!\s*(?:am|pm|a\.?m\.?|p\.?m\.?|hrs?))/);
       if (numMatch) {
         const dia = parseInt(numMatch[1], 10);
         if (dia >= 1 && dia <= 31) {
