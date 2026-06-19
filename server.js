@@ -824,20 +824,51 @@ app.post('/webhook', async (req, res) => {
       const { client } = await getClienteYCita(from);
       const firstName = client?.name?.split(' ')[0] || 'amigo';
 
-      const nextDays = getNextDays(4);
+      // ✅ FIX: Revisar HOY primero (igual que buildDisponibilidadMsg), luego días siguientes
+      const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
+      const todayDayName = DAY_MAP[nowMX.getDay()];
       const { data: barberos } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
+
+      const hayBarberosHoy = barberos?.some(b => {
+        const schedule = Array.isArray(b.schedule) ? b.schedule : [];
+        return schedule.some(d => d.replace('á','a').replace('é','e') === todayDayName.replace('á','a').replace('é','e'));
+      });
+
       let primerDia = null;
-      for (const day of nextDays) {
-        const dayName = DAY_MAP[day.getDay()];
-        const tieneBarbe = barberos?.some(b => {
+      let primerDiaLabel = null;
+
+      if (hayBarberosHoy) {
+        const todayStr = nowMX.toISOString().slice(0, 10);
+        const barberosHoy = barberos.filter(b => {
           const schedule = Array.isArray(b.schedule) ? b.schedule : [];
-          return schedule.some(d => d.replace('á','a').replace('é','e') === dayName.replace('á','a').replace('é','e'));
+          return schedule.some(d => d.replace('á','a').replace('é','e') === todayDayName.replace('á','a').replace('é','e'));
         });
-        if (tieneBarbe) { primerDia = day; break; }
+        let haySlots = false;
+        for (const b of barberosHoy) {
+          const slots = await getSlotsLibres(b.id, todayStr);
+          if (slots.length) { haySlots = true; break; }
+        }
+        if (haySlots) {
+          primerDia = todayStr;
+          primerDiaLabel = formatDateMX(nowMX);
+        }
+      }
+
+      // Si hoy no tiene slots, buscar el siguiente día disponible
+      if (!primerDia) {
+        const nextDays = getNextDays(4);
+        for (const day of nextDays) {
+          const dayName = DAY_MAP[day.getDay()];
+          const tieneBarbe = barberos?.some(b => {
+            const schedule = Array.isArray(b.schedule) ? b.schedule : [];
+            return schedule.some(d => d.replace('á','a').replace('é','e') === dayName.replace('á','a').replace('é','e'));
+          });
+          if (tieneBarbe) { primerDia = toYMD(day); primerDiaLabel = formatDateMX(day); break; }
+        }
       }
 
       if (primerDia) {
-        conversationState[from] = { step: 'esperando_seleccion', fecha: toYMD(primerDia), fechaLabel: formatDateMX(primerDia) };
+        conversationState[from] = { step: 'esperando_seleccion', fecha: primerDia, fechaLabel: primerDiaLabel };
       }
 
       const disponibilidadMsg = await buildDisponibilidadMsg();
