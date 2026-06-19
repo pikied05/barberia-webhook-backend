@@ -631,26 +631,48 @@ app.post('/webhook', async (req, res) => {
     }
 
     if (state?.step === 'esperando_seleccion') {
-      // ✅ FIX 2 & 3: Detectar si el cliente mandó solo una hora (sin nombre de barbero)
-      // Soporta: "6 pm", "18 hrs", "18:00", "6:00 pm", "¿tendrás disponible 6 pm?"
-      const soloHoraMatch = text.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.?m\.?|p\.?m\.?|hrs?)?/i);
-      const matchNombreHora = text.match(/([a-záéíóúñA-ZÁÉÍÓÚÑ\s]+)\s+(\d{1,2}:\d{2})/i);
+      // ── PASO 1: Detectar si el cliente pide otra fecha (mañana, sábado, el 21…)
+      // Esto va PRIMERO para que "para mañana" o "sábado 11 am" no caigan en el parser de hora
+      const fechaEnMensaje = parsearFechaPedida(text);
+      if (fechaEnMensaje) {
+        // El cliente quiere otra fecha — mostrar disponibilidad de ese día
+        await mostrarDisponibilidadEnFecha(fechaEnMensaje, '¡Claro!');
+        return;
+      }
 
-      // Verificar que NO sea un nombre+hora antes de tratarlo como solo-hora
+      // ── PASO 2: Detectar si el mensaje tiene "día + hora" (ej: "sábado 11 am", "lunes 15:00")
+      // El día ya fue descartado arriba solo si parsearFechaPedida retornó algo;
+      // aquí capturamos el caso "dia hora" donde el día no generó fecha (no debería pasar,
+      // pero por si acaso extraemos la hora limpia ignorando palabras de días)
+      const textSinDias = text
+        .replace(/lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|ma[nñ]ana|pasado/gi, '')
+        .trim();
+
+      // ── PASO 3: Intentar match nombre+hora (ej: "Giovanni 15:00")
+      const matchNombreHora = textSinDias.match(/([a-záéíóúñA-ZÁÉÍÓÚÑ]+(?:\s+[a-záéíóúñA-ZÁÉÍÓÚÑ]+)?)\s+(\d{1,2}:\d{2})/i);
+
+      // ── PASO 4: Intentar match solo-hora (ej: "11 am", "18:00", "6 pm")
+      // Requiere meridiano O formato HH:MM para evitar falsos positivos con números sueltos
+      const soloHoraMatch = textSinDias.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.?m\.?|p\.?m\.?|hrs?)/i)
+                         || textSinDias.match(/(\d{2}):(\d{2})/);
+
       const esNombreYHora = !!matchNombreHora;
 
-      if (!esNombreYHora && soloHoraMatch) {
-        // El cliente mandó solo una hora — buscar barbero disponible automáticamente
-        let hour = parseInt(soloHoraMatch[1], 10);
-        const minutes = soloHoraMatch[2] ? parseInt(soloHoraMatch[2], 10) : 0;
-        const meridiano = soloHoraMatch[3]?.toLowerCase().replace(/\./g, '').replace('hrs', '').trim();
+      // ── Helper local: parsear hora de un match ────────────────────────────
+      function parsearHoraDeMatch(m) {
+        let hour = parseInt(m[1], 10);
+        const minutes = m[2] ? parseInt(m[2], 10) : 0;
+        const meridiano = m[3]?.toLowerCase().replace(/\./g, '').replace('hrs', '').trim() || '';
         if (meridiano === 'pm' && hour < 12) hour += 12;
         if (meridiano === 'am' && hour === 12) hour = 0;
-        // Si no tiene meridiano y la hora es < 10, asumir PM (rango de la barbería)
-        if (!meridiano && hour < 10) hour += 12;
-        const horaSolicitada = `${String(hour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+        if (!meridiano && hour < 10) hour += 12; // asumir PM si < 10 sin meridiano
+        return `${String(hour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+      }
 
-        // Verificar que la hora esté dentro del rango de la barbería
+      if (!esNombreYHora && soloHoraMatch) {
+        // Solo hora — auto-asignar barbero disponible
+        const horaSolicitada = parsearHoraDeMatch(soloHoraMatch);
+
         if (!ALL_SLOTS.includes(horaSolicitada)) {
           await chakraSendSession(from,
             `😅 La hora *${horaSolicitada}* no está en nuestro horario (10:00 – 19:30).\nDime otra hora o escribe *cancelar*.`
@@ -673,7 +695,6 @@ app.post('/webhook', async (req, res) => {
           return;
         }
 
-        // ✅ Auto-asignar: tomar el primer barbero disponible
         const barberoAsignado = disponibles[Math.floor(Math.random() * disponibles.length)];
         const { client } = await getClienteYCita(from);
         const digits10 = from.replace(/^52/, '').slice(-10);
