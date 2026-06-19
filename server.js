@@ -602,7 +602,7 @@ app.post('/webhook', async (req, res) => {
       }
 
       if (disponibles.length === 1) {
-        const barbero = disponibles[0];
+        const barbero = disponibles[Math.floor(Math.random() * disponibles.length)];
         const { client } = await getClienteYCita(from);
         const digits10 = from.replace(/^52/, '').slice(-10);
         conversationState[from] = {
@@ -674,7 +674,7 @@ app.post('/webhook', async (req, res) => {
         }
 
         // ✅ Auto-asignar: tomar el primer barbero disponible
-        const barberoAsignado = disponibles[0];
+        const barberoAsignado = disponibles[Math.floor(Math.random() * disponibles.length)];
         const { client } = await getClienteYCita(from);
         const digits10 = from.replace(/^52/, '').slice(-10);
 
@@ -869,27 +869,39 @@ app.post('/webhook', async (req, res) => {
 
     // ── Helper: parsear fecha pedida por el cliente ──────────────────────────
     function parsearFechaPedida(txt) {
-      const t = txt.toLowerCase();
+      // Normalizar: quitar acentos, minúsculas, quitar signos
+      const normalizar = s => s.toLowerCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .replace(/[¿?¡!]/g, ' ');
+      const t = normalizar(txt);
       const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
 
-      // "mañana"
-      if (t.includes('mañana') || t.includes('manana')) {
-        const d = new Date(nowMX); d.setDate(d.getDate() + 1); return d;
-      }
-      // "pasado mañana"
+      // "pasado mañana" — va antes que "mañana" para no hacer match parcial
       if (t.includes('pasado')) {
         const d = new Date(nowMX); d.setDate(d.getDate() + 2); return d;
       }
+      // "mañana" / "manana"
+      if (t.includes('manana') || t.includes('mañana')) {
+        const d = new Date(nowMX); d.setDate(d.getDate() + 1); return d;
+      }
 
-      // Día de semana: lunes, martes, miércoles, jueves, viernes, sábado, domingo
-      const diasSemana = ['domingo','lunes','martes','miércoles','miercoles','jueves','viernes','sábado','sabado'];
-      const diasIdx    = [0, 1, 2, 3, 3, 4, 5, 6, 6]; // mapeo a getDay()
-      for (let i = 0; i < diasSemana.length; i++) {
-        if (t.includes(diasSemana[i])) {
-          const target = diasIdx[i];
+      // Días de la semana normalizados (sin acentos)
+      // Orden importa: más largos primero para evitar match parcial (miercoles antes que miér)
+      const diasMap = [
+        { palabras: ['miercoles'], idx: 3 },
+        { palabras: ['domingo'],   idx: 0 },
+        { palabras: ['lunes'],     idx: 1 },
+        { palabras: ['martes'],    idx: 2 },
+        { palabras: ['jueves'],    idx: 4 },
+        { palabras: ['viernes'],   idx: 5 },
+        { palabras: ['sabado'],    idx: 6 },
+      ];
+
+      for (const { palabras, idx } of diasMap) {
+        if (palabras.some(p => t.includes(p))) {
           const d = new Date(nowMX);
-          let diff = target - d.getDay();
-          if (diff <= 0) diff += 7; // siempre hacia adelante
+          let diff = idx - d.getDay();
+          if (diff <= 0) diff += 7; // siempre el próximo, nunca hoy ni atrás
           d.setDate(d.getDate() + diff);
           return d;
         }
@@ -902,7 +914,6 @@ app.post('/webhook', async (req, res) => {
         if (dia >= 1 && dia <= 31) {
           const d = new Date(nowMX);
           d.setDate(dia);
-          // Si ese día ya pasó este mes, ir al siguiente mes
           if (d <= nowMX) d.setMonth(d.getMonth() + 1);
           return d;
         }
