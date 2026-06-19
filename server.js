@@ -523,7 +523,7 @@ app.post('/webhook', async (req, res) => {
     // 🔴 AUTOMATIZACIÓN DESACTIVADA TEMPORALMENTE
     // Cambiar AUTOMATION_ENABLED a true para reactivar el bot.
     // ══════════════════════════════════════════════════════════════════════════
-    const AUTOMATION_ENABLED = true; // <-- CAMBIAR A TRUE PARA REACTIVAR
+    const AUTOMATION_ENABLED = true;
     if (!AUTOMATION_ENABLED) {
       console.log(`⏸️ Automatización desactivada — mensaje de ${from} ignorado`);
       return;
@@ -867,12 +867,162 @@ app.post('/webhook', async (req, res) => {
       }
     }
 
+    // ── Helper: parsear fecha pedida por el cliente ──────────────────────────
+    function parsearFechaPedida(txt) {
+      const t = txt.toLowerCase();
+      const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
+
+      // "mañana"
+      if (t.includes('mañana') || t.includes('manana')) {
+        const d = new Date(nowMX); d.setDate(d.getDate() + 1); return d;
+      }
+      // "pasado mañana"
+      if (t.includes('pasado')) {
+        const d = new Date(nowMX); d.setDate(d.getDate() + 2); return d;
+      }
+
+      // Día de semana: lunes, martes, miércoles, jueves, viernes, sábado, domingo
+      const diasSemana = ['domingo','lunes','martes','miércoles','miercoles','jueves','viernes','sábado','sabado'];
+      const diasIdx    = [0, 1, 2, 3, 3, 4, 5, 6, 6]; // mapeo a getDay()
+      for (let i = 0; i < diasSemana.length; i++) {
+        if (t.includes(diasSemana[i])) {
+          const target = diasIdx[i];
+          const d = new Date(nowMX);
+          let diff = target - d.getDay();
+          if (diff <= 0) diff += 7; // siempre hacia adelante
+          d.setDate(d.getDate() + diff);
+          return d;
+        }
+      }
+
+      // Número de día del mes: "el 21", "para el 25"
+      const numMatch = t.match(/\b(\d{1,2})\b/);
+      if (numMatch) {
+        const dia = parseInt(numMatch[1], 10);
+        if (dia >= 1 && dia <= 31) {
+          const d = new Date(nowMX);
+          d.setDate(dia);
+          // Si ese día ya pasó este mes, ir al siguiente mes
+          if (d <= nowMX) d.setMonth(d.getMonth() + 1);
+          return d;
+        }
+      }
+
+      return null;
+    }
+
+    // ── Helper: buscar disponibilidad en una fecha y mostrarla ───────────────
+    async function mostrarDisponibilidadEnFecha(fechaDate, prefijo = '¡Perfecto! 💈') {
+      const { data: barberos } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
+      const dateStr  = toYMD(fechaDate);
+      const dayName  = DAY_MAP[fechaDate.getDay()];
+      const label    = formatDateMX(fechaDate);
+
+      // Filtrar barberos que trabajen ese día
+      const barberosDelDia = (barberos || []).filter(b => {
+        const schedule = Array.isArray(b.schedule) ? b.schedule : [];
+        return schedule.some(d => d.replace('á','a').replace('é','e') === dayName.replace('á','a').replace('é','e'));
+      });
+
+      let haySlots = false;
+      let msgSlots = `✂️ *Horarios disponibles — ${label}:*
+
+`;
+
+      for (const b of barberosDelDia) {
+        const slots = await getSlotsLibres(b.id, dateStr);
+        const seleccionados = splitSlots(slots);
+        if (!seleccionados.length) continue;
+        haySlots = true;
+        msgSlots += `👤 *${b.name}:* ${seleccionados.join(' · ')}
+`;
+      }
+
+      if (!haySlots || !barberosDelDia.length) {
+        // Ese día no hay nada — buscar el siguiente día disponible
+        const nextDays = getNextDays(7);
+        let fallbackDate = null, fallbackLabel = null;
+        for (const day of nextDays) {
+          const dn = DAY_MAP[day.getDay()];
+          const tieneBarbe = (barberos || []).some(b => {
+            const schedule = Array.isArray(b.schedule) ? b.schedule : [];
+            return schedule.some(d => d.replace('á','a').replace('é','e') === dn.replace('á','a').replace('é','e'));
+          });
+          if (!tieneBarbe) continue;
+          // Verificar slots reales
+          const barberosDay = (barberos || []).filter(b => {
+            const schedule = Array.isArray(b.schedule) ? b.schedule : [];
+            return schedule.some(d => d.replace('á','a').replace('é','e') === dn.replace('á','a').replace('é','e'));
+          });
+          let tieneSlotsLibres = false;
+          for (const b of barberosDay) {
+            const s = await getSlotsLibres(b.id, toYMD(day));
+            if (s.length) { tieneSlotsLibres = true; break; }
+          }
+          if (tieneSlotsLibres) { fallbackDate = day; fallbackLabel = formatDateMX(day); break; }
+        }
+
+        if (!fallbackDate) {
+          await chakraSendSession(from, `😔 Lo sentimos, ese día no tenemos disponibilidad ni en los días siguientes. Escríbenos para ayudarte a encontrar una fecha.`);
+          delete conversationState[from];
+          return;
+        }
+
+        const fallbackStr = toYMD(fallbackDate);
+        const fallbackDayName = DAY_MAP[fallbackDate.getDay()];
+        let msgFallback = `😔 El *${label}* no tenemos disponibilidad.
+
+Pero el *${fallbackLabel}* sí tenemos espacio:
+
+`;
+        const barberosF = (barberos || []).filter(b => {
+          const schedule = Array.isArray(b.schedule) ? b.schedule : [];
+          return schedule.some(d => d.replace('á','a').replace('é','e') === fallbackDayName.replace('á','a').replace('é','e'));
+        });
+        for (const b of barberosF) {
+          const slots = await getSlotsLibres(b.id, fallbackStr);
+          const seleccionados = splitSlots(slots);
+          if (!seleccionados.length) continue;
+          msgFallback += `👤 *${b.name}:* ${seleccionados.join(' · ')}
+`;
+        }
+        msgFallback += `
+➡️ Responde con el *nombre del barbero* y la *hora*.
+Ej: _Giovanni 15:00_
+
+💡 ¿No conoces a los barberos? Solo manda la *hora* y nosotros te asignamos uno disponible.`;
+        conversationState[from] = { step: 'esperando_seleccion', fecha: fallbackStr, fechaLabel: fallbackLabel };
+        await chakraSendSession(from, msgFallback);
+        return;
+      }
+
+      msgSlots += `
+➡️ Responde con el *nombre del barbero* y la *hora*.
+Ej: _Giovanni 15:00_
+
+💡 ¿No conoces a los barberos? Solo manda la *hora* y nosotros te asignamos uno disponible.
+Ej: _15:00_ o _3 pm_`;
+      conversationState[from] = { step: 'esperando_seleccion', fecha: dateStr, fechaLabel: label };
+      await chakraSendSession(from, `${prefijo} Aquí tienes los horarios disponibles:
+
+${msgSlots}`);
+    }
+
     // ── Si está esperando confirmación de si quiere cita ─────────────────────
     if (state?.step === 'esperando_confirmacion_cita') {
-      if (quiereCita || esAgendar) {
+      // ¿Menciona una fecha específica? (mañana, sábado, el 21, etc.)
+      const fechaPedida = parsearFechaPedida(text);
+
+      if (fechaPedida) {
+        // Quiere cita pero en otra fecha
+        await mostrarDisponibilidadEnFecha(fechaPedida, '¡Perfecto!');
+      } else if (quiereCita || esAgendar) {
+        // Quiere cita en el próximo día disponible
         await prepararFechaYGuardarState();
         const disponibilidadMsg = await buildDisponibilidadMsg();
-        await chakraSendSession(from, `¡Perfecto! 💈 Aquí tienes los horarios disponibles:\n\n${disponibilidadMsg}`);
+        await chakraSendSession(from, `¡Perfecto! 💈 Aquí tienes los horarios disponibles:
+
+${disponibilidadMsg}`);
       } else {
         delete conversationState[from];
         await chakraSendSession(from, `¡Claro! Si en algún momento deseas vivir la experiencia IMPERIUM, aquí estaremos. 🫡`);
