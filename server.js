@@ -245,8 +245,7 @@ async function buildDisponibilidadMsg() {
 
     hayDisponibilidad = true;
     const preview = seleccionados.join(' · ');
-    const mas = slots.length > seleccionados.length ? ` (+${slots.length - seleccionados.length} más)` : '';
-    msg += `👤 *${barbero.name}:* ${preview}${mas}
+    msg += `👤 *${barbero.name}:* ${preview}
 `;
   }
 
@@ -535,6 +534,95 @@ app.post('/webhook', async (req, res) => {
       delete conversationState[from];
       const { client } = await getClienteYCita(from);
       await chakraSendSession(from, `Ok ${client?.name?.split(' ')[0] || 'amigo'}, cancelé el proceso. Escríbeme *hola* cuando quieras agendar. 👍`);
+      return;
+    }
+
+    // ── Quiere otro horario distinto al que ya se le mostró/ofreció ──────────
+    // Va antes que los pasos de la conversación (esperando_seleccion, confirmando,
+    // etc.) para que tenga prioridad incluso si el cliente está a medio agendar.
+    const esOtroHorario = [
+      'otro horario', 'otra hora', 'otros horarios',
+      'algo más tarde', 'algo mas tarde', 'algo más temprano', 'algo mas temprano',
+      'no me sirve', 'no me queda', 'tienes otro', 'hay otro horario', 'más tarde', 'mas tarde',
+    ].some(k => textLower.includes(k));
+
+    if (esOtroHorario) {
+      // Si ya teníamos una fecha en curso (porque le mostramos disponibilidad o
+      // estaba a medio agendar), la reusamos; si no, calculamos el próximo día
+      // con barberos disponibles, igual que en el saludo inicial.
+      let fecha = state?.fecha;
+      let fechaLabel = state?.fechaLabel;
+      if (!fecha) {
+        const nextDays = getNextDays(4);
+        const { data: barberosDisp } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
+        for (const day of nextDays) {
+          const dayName = DAY_MAP[day.getDay()];
+          const tieneBarbe = barberosDisp?.some(b => {
+            const schedule = Array.isArray(b.schedule) ? b.schedule : [];
+            return schedule.some(d => d.replace('á','a').replace('é','e') === dayName.replace('á','a').replace('é','e'));
+          });
+          if (tieneBarbe) { fecha = toYMD(day); fechaLabel = formatDateMX(day); break; }
+        }
+      }
+      conversationState[from] = { step: 'esperando_hora_especifica', fecha, fechaLabel };
+      await chakraSendSession(from, `Claro 🙌 ¿A qué hora te gustaría? Dime la hora (ej: *17:00* o *5:00 pm*) y te digo si hay alguien disponible.`);
+      return;
+    }
+
+    if (state?.step === 'esperando_hora_especifica') {
+      const horaMatch = text.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.?m\.?|p\.?m\.?)?/i);
+      if (!horaMatch) {
+        await chakraSendSession(from, `No entendí la hora 😅\nDime algo como *17:00* o *5:00 pm*, o escribe *cancelar*.`);
+        return;
+      }
+
+      let hour = parseInt(horaMatch[1], 10);
+      const minutes = horaMatch[2] ? parseInt(horaMatch[2], 10) : 0;
+      const meridiano = horaMatch[3]?.toLowerCase().replace(/\./g, '');
+      if (meridiano === 'pm' && hour < 12) hour += 12;
+      if (meridiano === 'am' && hour === 12) hour = 0;
+      const horaSolicitada = `${String(hour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+
+      const { data: barberos } = await supabase.from('barbers').select('id, name').eq('active', true);
+      const disponibles = [];
+      for (const barbero of (barberos || [])) {
+        const slotsLibres = await getSlotsLibres(barbero.id, state.fecha);
+        if (slotsLibres.includes(horaSolicitada)) disponibles.push(barbero);
+      }
+
+      if (!disponibles.length) {
+        await chakraSendSession(from,
+          `😔 A las *${horaSolicitada}* no tengo a nadie libre el *${state.fechaLabel}*.\n¿Quieres intentar otra hora? Dime cuál, o escribe *cancelar*.`
+        );
+        return; // se queda esperando otra hora
+      }
+
+      if (disponibles.length === 1) {
+        const barbero = disponibles[0];
+        const { client } = await getClienteYCita(from);
+        const digits10 = from.replace(/^52/, '').slice(-10);
+        conversationState[from] = {
+          step: 'confirmando',
+          barberoId: barbero.id, barberoName: barbero.name,
+          fecha: state.fecha, fechaLabel: state.fechaLabel,
+          hora: horaSolicitada,
+          clientId: client?.id, clientName: client?.name || 'Cliente', clientPhone: digits10,
+        };
+        await chakraSendSession(from,
+          `✅ *${barbero.name}* está libre a las *${horaSolicitada}* el *${state.fechaLabel}*.\n\n` +
+          `📋 *Resumen de tu cita:*\n👤 Barbero: *${barbero.name}*\n📅 Fecha: *${state.fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n\n` +
+          `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
+        );
+        return;
+      }
+
+      // Varios barberos libres a esa hora — que elija
+      conversationState[from] = { step: 'esperando_seleccion', fecha: state.fecha, fechaLabel: state.fechaLabel };
+      const nombres = disponibles.map(b => `*${b.name}*`).join(', ');
+      await chakraSendSession(from,
+        `✅ A las *${horaSolicitada}* el *${state.fechaLabel}* tienes disponible a: ${nombres}.\n` +
+        `Responde con el *nombre del barbero* y la hora.\nEj: _${disponibles[0].name} ${horaSolicitada}_`
+      );
       return;
     }
 
