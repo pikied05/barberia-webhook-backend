@@ -179,46 +179,82 @@ async function getSlotsLibres(barberId, dateStr) {
   });
 }
 
+// Horarios considerados "mañana" (antes de las 14:00) y "tarde" (14:00 en adelante)
+function splitSlots(slots) {
+  const manana = slots.filter(s => parseInt(s.split(':')[0]) < 14);
+  const tarde  = slots.filter(s => parseInt(s.split(':')[0]) >= 14);
+  // 2 de mañana y 2 de tarde
+  return [...manana.slice(0, 2), ...tarde.slice(0, 2)];
+}
+
 async function buildDisponibilidadMsg() {
   const { data: barberos } = await supabase
     .from('barbers').select('id, name, schedule').eq('active', true);
 
   if (!barberos?.length) return '😔 No hay barberos disponibles en este momento.';
 
-  const nextDays = getNextDays(4);
-  let msg = '✂️ *Horarios disponibles:*\n\n';
-  let hayDisponibilidad = false;
+  // ✅ Solo mostrar el día de HOY en México (UTC-6)
+  const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
+  const todayStr = nowMX.toISOString().slice(0, 10);
+  const dayName  = DAY_MAP[nowMX.getDay()];
 
-  for (const day of nextDays) {
-    const dayName = DAY_MAP[day.getDay()];
-    const dateStr = toYMD(day);
-    const barberosHoy = barberos.filter(b => {
-      const schedule = Array.isArray(b.schedule) ? b.schedule : [];
-      return schedule.some(d =>
-        d.replace('á','a').replace('é','e') === dayName.replace('á','a').replace('é','e')
-      );
-    });
+  const barberosHoy = barberos.filter(b => {
+    const schedule = Array.isArray(b.schedule) ? b.schedule : [];
+    return schedule.some(d =>
+      d.replace('á','a').replace('é','e') === dayName.replace('á','a').replace('é','e')
+    );
+  });
 
-    if (!barberosHoy.length) continue;
+  // Si hoy no hay barberos, buscar el siguiente día disponible
+  let diaFinal = nowMX;
+  let dateStrFinal = todayStr;
+  let barberosFinales = barberosHoy;
 
-    const lineasBarberos = [];
-    for (const barbero of barberosHoy) {
-      const slots = await getSlotsLibres(barbero.id, dateStr);
-      if (!slots.length) continue;
-      const preview = slots.slice(0, 4).join(' · ');
-      const mas = slots.length > 4 ? ` (+${slots.length - 4} más)` : '';
-      lineasBarberos.push(`  👤 *${barbero.name}:* ${preview}${mas}`);
-    }
-
-    if (lineasBarberos.length) {
-      hayDisponibilidad = true;
-      msg += `📅 *${formatDateMX(day)}*\n${lineasBarberos.join('\n')}\n\n`;
+  if (!barberosHoy.length) {
+    const nextDays = getNextDays(4);
+    for (const day of nextDays) {
+      const dn = DAY_MAP[day.getDay()];
+      const tieneBarbe = barberos.some(b => {
+        const schedule = Array.isArray(b.schedule) ? b.schedule : [];
+        return schedule.some(d => d.replace('á','a').replace('é','e') === dn.replace('á','a').replace('é','e'));
+      });
+      if (tieneBarbe) {
+        diaFinal = day;
+        dateStrFinal = toYMD(day);
+        barberosFinales = barberos.filter(b => {
+          const schedule = Array.isArray(b.schedule) ? b.schedule : [];
+          return schedule.some(d => d.replace('á','a').replace('é','e') === dn.replace('á','a').replace('é','e'));
+        });
+        break;
+      }
     }
   }
 
-  if (!hayDisponibilidad) return '😔 No hay horarios disponibles en los próximos días. Escríbenos para buscar una fecha alternativa.';
+  let msg = `✂️ *Horarios disponibles — ${formatDateMX(diaFinal)}:*
 
-  msg += '➡️ Responde con el *nombre del barbero* y la *hora* que prefieras.\nEj: _Giovanni 15:00_';
+`;
+  let hayDisponibilidad = false;
+
+  for (const barbero of barberosFinales) {
+    const slots = await getSlotsLibres(barbero.id, dateStrFinal);
+    if (!slots.length) continue;
+
+    // 2 de mañana + 2 de tarde
+    const seleccionados = splitSlots(slots);
+    if (!seleccionados.length) continue;
+
+    hayDisponibilidad = true;
+    const preview = seleccionados.join(' · ');
+    const mas = slots.length > seleccionados.length ? ` (+${slots.length - seleccionados.length} más)` : '';
+    msg += `👤 *${barbero.name}:* ${preview}${mas}
+`;
+  }
+
+  if (!hayDisponibilidad) return '😔 No hay horarios disponibles hoy. Escríbenos para buscar una fecha alternativa.';
+
+  msg += `
+➡️ Responde con el *nombre del barbero* y la *hora*.
+Ej: _Giovanni 15:00_`;
   return msg;
 }
 
@@ -479,6 +515,16 @@ app.post('/webhook', async (req, res) => {
     const text      = msg.text.body.trim();
     const textLower = text.toLowerCase();
     console.log(`📩 WhatsApp de ${from}: "${text}"`);
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // 🔴 AUTOMATIZACIÓN DESACTIVADA TEMPORALMENTE
+    // Cambiar AUTOMATION_ENABLED a true para reactivar el bot.
+    // ══════════════════════════════════════════════════════════════════════════
+    const AUTOMATION_ENABLED = false;
+    if (!AUTOMATION_ENABLED) {
+      console.log(`⏸️ Automatización desactivada — mensaje de ${from} ignorado`);
+      return;
+    }
 
     // ══════════════════════════════════════════════════════════════════════════
     // FLUJO DE AGENDADO
@@ -808,7 +854,9 @@ app.post('/test-send-image', async (req, res) => {
 });
 
 app.get('/test-encuestas', async (req, res) => {
-  const yesterday = new Date();
+  // ✅ "Ayer en México" (UTC-6)
+  const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
+  const yesterday = new Date(nowMX);
   yesterday.setDate(yesterday.getDate() - 1);
   const yesterdayStr = yesterday.toISOString().slice(0, 10);
   const { data: citas, error } = await supabase
@@ -856,7 +904,9 @@ app.get('/test-send', async (req, res) => {
 // ─── Recordatorios 24h ───────────────────────────────────────────────────────
 
 async function enviarRecordatorios(etiqueta = '') {
-  const tomorrow = new Date();
+  // ✅ "Mañana en México" (UTC-6)
+  const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
+  const tomorrow = new Date(nowMX);
   tomorrow.setDate(tomorrow.getDate() + 1);
   const tomorrowStr = tomorrow.toISOString().slice(0, 10);
   console.log(`⏰ [${etiqueta}] Enviando recordatorios para ${tomorrowStr}...`);
@@ -893,7 +943,9 @@ async function enviarRecordatorios(etiqueta = '') {
 // ✅ FIX: ahora incluye citas 'pendiente' Y 'confirmada' (no solo confirmada)
 // porque muchos clientes asisten sin haber respondido el recordatorio.
 async function enviarEncuestas(etiqueta = '') {
-  const yesterday = new Date();
+  // ✅ "Ayer en México" (UTC-6)
+  const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
+  const yesterday = new Date(nowMX);
   yesterday.setDate(yesterday.getDate() - 1);
   const yesterdayStr = yesterday.toISOString().slice(0, 10);
   console.log(`⭐ [${etiqueta}] Enviando encuestas para citas del ${yesterdayStr}...`);
