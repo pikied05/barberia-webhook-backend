@@ -143,7 +143,6 @@ function formatFechaCorta(ymd) {
   return `${parseInt(d, 10)} de ${meses[parseInt(m, 10) - 1] || ymd}`;
 }
 
-// ✅ MODIFICADO: Acepta filtro de hora actual para no mostrar horarios pasados
 async function getSlotsLibres(barberId, dateStr, filtroHoraActual = null) {
   const { data: citas } = await supabase
     .from('appointments')
@@ -166,7 +165,6 @@ async function getSlotsLibres(barberId, dateStr, filtroHoraActual = null) {
   }
 
   return ALL_SLOTS.filter(slot => {
-    // ✅ Si es hoy y se pasó el slot, no mostrarlo
     if (filtroHoraActual !== null) {
       const [h, m] = slot.split(':').map(Number);
       const slotMinutos = h * 60 + m;
@@ -187,15 +185,12 @@ async function getSlotsLibres(barberId, dateStr, filtroHoraActual = null) {
   });
 }
 
-// Horarios considerados "mañana" (antes de las 14:00) y "tarde" (14:00 en adelante)
 function splitSlots(slots) {
   const manana = slots.filter(s => parseInt(s.split(':')[0]) < 14);
   const tarde  = slots.filter(s => parseInt(s.split(':')[0]) >= 14);
-  // 2 de mañana y 2 de tarde
   return [...manana.slice(0, 2), ...tarde.slice(0, 2)];
 }
 
-// ✅ MODIFICADO: Filtrar horarios pasados cuando es hoy
 async function buildDisponibilidadMsg() {
   const { data: barberos } = await supabase
     .from('barbers').select('id, name, schedule').eq('active', true);
@@ -588,6 +583,53 @@ Ej: _15:00_ o _3 pm_`;
   await chakraSendSession(from, `${prefijo} Aquí tienes los horarios disponibles:\n\n${msgSlots}`);
 }
 
+async function prepararFechaYGuardarState(from) {
+  const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
+  const todayDayName = DAY_MAP[nowMX.getDay()];
+  const { data: barberos } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
+
+  const hayBarberosHoy = barberos?.some(b => {
+    const schedule = Array.isArray(b.schedule) ? b.schedule : [];
+    return schedule.some(d => d.replace('á','a').replace('é','e') === todayDayName.replace('á','a').replace('é','e'));
+  });
+
+  let primerDia = null;
+  let primerDiaLabel = null;
+
+  if (hayBarberosHoy) {
+    const todayStr = nowMX.toISOString().slice(0, 10);
+    const barberosHoy = barberos.filter(b => {
+      const schedule = Array.isArray(b.schedule) ? b.schedule : [];
+      return schedule.some(d => d.replace('á','a').replace('é','e') === todayDayName.replace('á','a').replace('é','e'));
+    });
+    let haySlots = false;
+    const horaActual = nowMX.getHours() * 60 + nowMX.getMinutes();
+    for (const b of barberosHoy) {
+      const slots = await getSlotsLibres(b.id, todayStr, horaActual);
+      if (slots.length) { haySlots = true; break; }
+    }
+    if (haySlots) { primerDia = todayStr; primerDiaLabel = formatDateMX(nowMX); }
+  }
+
+  if (!primerDia) {
+    const nextDays = getNextDays(4);
+    const { data: bAll } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
+    for (const day of nextDays) {
+      const dayName = DAY_MAP[day.getDay()];
+      const tieneBarbe = bAll?.some(b => {
+        const schedule = Array.isArray(b.schedule) ? b.schedule : [];
+        return schedule.some(d => d.replace('á','a').replace('é','e') === dayName.replace('á','a').replace('é','e'));
+      });
+      if (tieneBarbe) { primerDia = toYMD(day); primerDiaLabel = formatDateMX(day); break; }
+    }
+  }
+
+  if (primerDia) {
+    conversationState[from] = { step: 'esperando_seleccion', fecha: primerDia, fechaLabel: primerDiaLabel };
+  }
+  return { primerDia, primerDiaLabel };
+}
+
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
 
@@ -734,7 +776,6 @@ app.post('/webhook', async (req, res) => {
         return;
       }
 
-      // Verificar si es hoy para filtrar horarios pasados
       const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
       const todayStr = nowMX.toISOString().slice(0, 10);
       const esHoy = state.fecha === todayStr;
@@ -797,16 +838,14 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // ── Esperando selección (NUEVO PARSER MEJORADO) ────────────────────────
+    // ── Esperando selección ──────────────────────────────────────────────────
     if (state?.step === 'esperando_seleccion') {
-      // PASO 1: Detectar si el cliente pide otra fecha
       const fechaEnMensaje = parsearFechaPedida(text);
       if (fechaEnMensaje) {
         await mostrarDisponibilidadEnFecha(from, fechaEnMensaje, '¡Claro!');
         return;
       }
 
-      // PASO 2: Si escribe "cualquiera" -> asignar automático
       if (textLower.includes('cualquiera') || textLower.includes('cualquier')) {
         const { data: barberos } = await supabase.from('barbers').select('id, name').eq('active', true);
         const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
@@ -848,7 +887,6 @@ app.post('/webhook', async (req, res) => {
         return;
       }
 
-      // PASO 3: Intentar "6pm con Raúl", "6 pm con Raúl", "6:00 pm con Raúl"
       let matchNombreHora = null;
       let soloHoraMatch = null;
       
@@ -877,7 +915,6 @@ app.post('/webhook', async (req, res) => {
         }
       }
 
-      // PASO 4: Procesar si tenemos nombre + hora
       if (matchNombreHora) {
         let hour = parseInt(matchNombreHora.hora, 10);
         const minutes = parseInt(matchNombreHora.minutos, 10) || 0;
@@ -937,7 +974,6 @@ app.post('/webhook', async (req, res) => {
         return;
       }
 
-      // PASO 5: Solo hora (sin nombre)
       if (soloHoraMatch) {
         let hour = parseInt(soloHoraMatch[1], 10);
         const minutes = soloHoraMatch[2] ? parseInt(soloHoraMatch[2], 10) : 0;
@@ -1003,7 +1039,6 @@ app.post('/webhook', async (req, res) => {
         return;
       }
 
-      // PASO 6: No se entendió
       await chakraSendSession(from, `No entendí tu selección 😅\nEscríbeme así:\n- *Nombre del barbero* + hora: _Raúl 15:00_\n- O solo la hora: _15:00_ o _3 pm_\n\nO escribe *cancelar* para salir.`);
       return;
     }
@@ -1084,60 +1119,45 @@ app.post('/webhook', async (req, res) => {
 
     const esHola    = ['hola', 'hello', 'hi', 'buenas', 'buenos', 'buen dia', 'buen día', 'hey'].some(k => textLower.includes(k));
     const esAgendar = ['agendar', 'cita', 'appointment', 'reservar', 'turno', 'espacio', 'disponibilidad'].some(k => textLower.includes(k));
+    const quiereCita = ['sí', 'si', 'yes', 'claro', 'por favor', 'quiero', 'reserva', 'reservar', 'aparta', 'apartar', 'anota', 'anotar'].some(k => textLower.includes(k));
 
-    async function prepararFechaYGuardarState() {
-      const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
-      const todayDayName = DAY_MAP[nowMX.getDay()];
-      const { data: barberos } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
+    // ── Si está esperando confirmación de si quiere cita ─────────────────────
+    if (state?.step === 'esperando_confirmacion_cita') {
+      const fechaPedida = parsearFechaPedida(text);
 
-      const hayBarberosHoy = barberos?.some(b => {
-        const schedule = Array.isArray(b.schedule) ? b.schedule : [];
-        return schedule.some(d => d.replace('á','a').replace('é','e') === todayDayName.replace('á','a').replace('é','e'));
-      });
-
-      let primerDia = null;
-      let primerDiaLabel = null;
-
-      if (hayBarberosHoy) {
-        const todayStr = nowMX.toISOString().slice(0, 10);
-        const barberosHoy = barberos.filter(b => {
-          const schedule = Array.isArray(b.schedule) ? b.schedule : [];
-          return schedule.some(d => d.replace('á','a').replace('é','e') === todayDayName.replace('á','a').replace('é','e'));
-        });
-        let haySlots = false;
-        const horaActual = nowMX.getHours() * 60 + nowMX.getMinutes();
-        for (const b of barberosHoy) {
-          const slots = await getSlotsLibres(b.id, todayStr, horaActual);
-          if (slots.length) { haySlots = true; break; }
-        }
-        if (haySlots) { primerDia = todayStr; primerDiaLabel = formatDateMX(nowMX); }
+      if (fechaPedida) {
+        await mostrarDisponibilidadEnFecha(from, fechaPedida, '¡Perfecto!');
+      } else if (quiereCita || esAgendar) {
+        await prepararFechaYGuardarState(from);
+        const disponibilidadMsg = await buildDisponibilidadMsg();
+        await chakraSendSession(from, `¡Perfecto! 💈 Aquí tienes los horarios disponibles:\n\n${disponibilidadMsg}`);
+      } else {
+        delete conversationState[from];
+        await chakraSendSession(from, `¡Claro! Si en algún momento deseas vivir la experiencia IMPERIUM, aquí estaremos. 🫡`);
       }
-
-      if (!primerDia) {
-        const nextDays = getNextDays(4);
-        const { data: bAll } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
-        for (const day of nextDays) {
-          const dayName = DAY_MAP[day.getDay()];
-          const tieneBarbe = bAll?.some(b => {
-            const schedule = Array.isArray(b.schedule) ? b.schedule : [];
-            return schedule.some(d => d.replace('á','a').replace('é','e') === dayName.replace('á','a').replace('é','e'));
-          });
-          if (tieneBarbe) { primerDia = toYMD(day); primerDiaLabel = formatDateMX(day); break; }
-        }
-      }
-
-      if (primerDia) {
-        conversationState[from] = { step: 'esperando_seleccion', fecha: primerDia, fechaLabel: primerDiaLabel };
-      }
+      return;
     }
 
-    if (esHola || esAgendar) {
-      await prepararFechaYGuardarState();
+    // ── Hola / información general → mensaje de bienvenida ───────────────────
+    if (esHola && !esAgendar) {
+      conversationState[from] = { step: 'esperando_confirmacion_cita' };
+      await chakraSendSession(from,
+        `¡Hola! Gracias por contactar a *IMPERIUM CAESARS Barber Club*. 💈\n\n` +
+        `Te ayudamos a proyectar una mejor imagen a través de una experiencia de cuidado personal diseñada para caballeros, que incluye *asesoría de imagen*, *lavado de cabello*, *bebida de cortesía* y nuestras exclusivas *Manos del Emperador*.\n\n` +
+        `¿Te reservo algún espacio para vivir la experiencia IMPERIUM?`
+      );
+      return;
+    }
+
+    // ── Quiere agendar directamente ───────────────────────────────────────────
+    if (esAgendar) {
+      await prepararFechaYGuardarState(from);
       const disponibilidadMsg = await buildDisponibilidadMsg();
       await chakraSendSession(from, `¡Hola! 👋 Bienvenido a *Imperium Caesar's Barber Club* 💈\n\n${disponibilidadMsg}`);
       return;
     }
 
+    // ── Confirmación / cancelación de cita existente ──────────────────────────
     const { client, cita } = await getClienteYCita(from);
     const firstName = client?.name?.split(' ')[0] || 'amigo';
 
