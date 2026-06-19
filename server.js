@@ -449,11 +449,15 @@ app.get('/webhook', (req, res) => {
 
 // ─── Helpers internos del webhook ────────────────────────────────────────────
 
+function normalizarTexto(texto) {
+  return texto.toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+}
+
 function parsearFechaPedida(txt) {
-  const normalizar = s => s.toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-    .replace(/[¿?¡!]/g, ' ');
-  const t = normalizar(txt);
+  const t = normalizarTexto(txt);
   const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
 
   if (t.includes('pasado')) {
@@ -508,7 +512,7 @@ async function mostrarDisponibilidadEnFecha(from, fechaDate, prefijo = '¡Perfec
 
   const barberosDelDia = (barberos || []).filter(b => {
     const schedule = Array.isArray(b.schedule) ? b.schedule : [];
-    return schedule.some(d => d.replace('á','a').replace('é','e') === dayName.replace('á','a').replace('é','e'));
+    return schedule.some(d => normalizarTexto(d) === normalizarTexto(dayName));
   });
 
   let haySlots = false;
@@ -529,12 +533,12 @@ async function mostrarDisponibilidadEnFecha(from, fechaDate, prefijo = '¡Perfec
       const dn = DAY_MAP[day.getDay()];
       const tieneBarbe = (barberos || []).some(b => {
         const schedule = Array.isArray(b.schedule) ? b.schedule : [];
-        return schedule.some(d => d.replace('á','a').replace('é','e') === dn.replace('á','a').replace('é','e'));
+        return schedule.some(d => normalizarTexto(d) === normalizarTexto(dn));
       });
       if (!tieneBarbe) continue;
       const barberosDay = (barberos || []).filter(b => {
         const schedule = Array.isArray(b.schedule) ? b.schedule : [];
-        return schedule.some(d => d.replace('á','a').replace('é','e') === dn.replace('á','a').replace('é','e'));
+        return schedule.some(d => normalizarTexto(d) === normalizarTexto(dn));
       });
       let tieneSlotsLibres = false;
       for (const b of barberosDay) {
@@ -555,7 +559,7 @@ async function mostrarDisponibilidadEnFecha(from, fechaDate, prefijo = '¡Perfec
     let msgFallback = `😔 El *${label}* no tenemos disponibilidad.\n\nPero el *${fallbackLabel}* sí tenemos espacio:\n\n`;
     const barberosF = (barberos || []).filter(b => {
       const schedule = Array.isArray(b.schedule) ? b.schedule : [];
-      return schedule.some(d => d.replace('á','a').replace('é','e') === fallbackDayName.replace('á','a').replace('é','e'));
+      return schedule.some(d => normalizarTexto(d) === normalizarTexto(fallbackDayName));
     });
     for (const b of barberosF) {
       const slots = await getSlotsLibres(b.id, fallbackStr, null);
@@ -590,7 +594,7 @@ async function prepararFechaYGuardarState(from) {
 
   const hayBarberosHoy = barberos?.some(b => {
     const schedule = Array.isArray(b.schedule) ? b.schedule : [];
-    return schedule.some(d => d.replace('á','a').replace('é','e') === todayDayName.replace('á','a').replace('é','e'));
+    return schedule.some(d => normalizarTexto(d) === normalizarTexto(todayDayName));
   });
 
   let primerDia = null;
@@ -600,7 +604,7 @@ async function prepararFechaYGuardarState(from) {
     const todayStr = nowMX.toISOString().slice(0, 10);
     const barberosHoy = barberos.filter(b => {
       const schedule = Array.isArray(b.schedule) ? b.schedule : [];
-      return schedule.some(d => d.replace('á','a').replace('é','e') === todayDayName.replace('á','a').replace('é','e'));
+      return schedule.some(d => normalizarTexto(d) === normalizarTexto(todayDayName));
     });
     let haySlots = false;
     const horaActual = nowMX.getHours() * 60 + nowMX.getMinutes();
@@ -618,7 +622,7 @@ async function prepararFechaYGuardarState(from) {
       const dayName = DAY_MAP[day.getDay()];
       const tieneBarbe = bAll?.some(b => {
         const schedule = Array.isArray(b.schedule) ? b.schedule : [];
-        return schedule.some(d => d.replace('á','a').replace('é','e') === dayName.replace('á','a').replace('é','e'));
+        return schedule.some(d => normalizarTexto(d) === normalizarTexto(dayName));
       });
       if (tieneBarbe) { primerDia = toYMD(day); primerDiaLabel = formatDateMX(day); break; }
     }
@@ -730,7 +734,7 @@ app.post('/webhook', async (req, res) => {
           const dayName = DAY_MAP[day.getDay()];
           const tieneBarbe = barberosDisp?.some(b => {
             const schedule = Array.isArray(b.schedule) ? b.schedule : [];
-            return schedule.some(d => d.replace('á','a').replace('é','e') === dayName.replace('á','a').replace('é','e'));
+            return schedule.some(d => normalizarTexto(d) === normalizarTexto(dayName));
           });
           if (tieneBarbe) { fecha = toYMD(day); fechaLabel = formatDateMX(day); break; }
         }
@@ -933,12 +937,25 @@ app.post('/webhook', async (req, res) => {
           return;
         }
 
-        const nombreBuscado = matchNombreHora.nombre.toLowerCase();
+        // ✅ BUSCAR BARBERO CON NORMALIZACIÓN DE ACENTOS
+        const nombreBuscado = normalizarTexto(matchNombreHora.nombre);
         const { data: barberos } = await supabase.from('barbers').select('id, name').eq('active', true);
-        const barbero = barberos?.find(b => b.name.toLowerCase().includes(nombreBuscado) || nombreBuscado.includes(b.name.toLowerCase()));
+
+        // Buscar barbero comparando nombres normalizados (sin acentos)
+        const barbero = barberos?.find(b => {
+          const nombreBarbero = normalizarTexto(b.name);
+          return nombreBarbero.includes(nombreBuscado) || nombreBuscado.includes(nombreBarbero);
+        });
 
         if (!barbero) {
-          await chakraSendSession(from, `No encontré al barbero "${matchNombreHora.nombre}" 🤔\nRevisa el nombre o solo manda la hora para que te asignemos uno.\n\nEj: *15:00* o *3 pm*`);
+          // Si no encontró el barbero, mostrar los disponibles para que el cliente elija
+          const nombresDisponibles = barberos?.map(b => `*${b.name}*`).join(', ') || 'ninguno';
+          await chakraSendSession(from, 
+            `No encontré al barbero "${matchNombreHora.nombre}" 🤔\n` +
+            `Nuestros barberos son: ${nombresDisponibles}\n\n` +
+            `Revisa el nombre o solo manda la hora para que te asignemos uno.\n` +
+            `Ej: *15:00* o *3 pm*`
+          );
           return;
         }
 
