@@ -818,13 +818,11 @@ app.post('/webhook', async (req, res) => {
 
     // ── Hola / quiero agendar ─────────────────────────────────────────────────
     const esHola    = ['hola', 'hello', 'hi', 'buenas', 'buenos', 'buen dia', 'buen día', 'hey'].some(k => textLower.includes(k));
-    const esAgendar = ['agendar', 'cita', 'appointment', 'reservar', 'quiero', 'turno', 'hora'].some(k => textLower.includes(k));
+    const esAgendar = ['agendar', 'cita', 'appointment', 'reservar', 'turno', 'espacio', 'disponibilidad'].some(k => textLower.includes(k));
+    const quiereCita = ['sí', 'si', 'yes', 'claro', 'por favor', 'quiero', 'reserva', 'reservar', 'aparta', 'apartar', 'anota', 'anotar'].some(k => textLower.includes(k));
 
-    if (esHola || esAgendar) {
-      const { client } = await getClienteYCita(from);
-      const firstName = client?.name?.split(' ')[0] || 'amigo';
-
-      // ✅ FIX: Revisar HOY primero (igual que buildDisponibilidadMsg), luego días siguientes
+    // ── Helper interno: calcular primer día disponible y guardar en state ─────
+    async function prepararFechaYGuardarState() {
       const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
       const todayDayName = DAY_MAP[nowMX.getDay()];
       const { data: barberos } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
@@ -848,18 +846,15 @@ app.post('/webhook', async (req, res) => {
           const slots = await getSlotsLibres(b.id, todayStr);
           if (slots.length) { haySlots = true; break; }
         }
-        if (haySlots) {
-          primerDia = todayStr;
-          primerDiaLabel = formatDateMX(nowMX);
-        }
+        if (haySlots) { primerDia = todayStr; primerDiaLabel = formatDateMX(nowMX); }
       }
 
-      // Si hoy no tiene slots, buscar el siguiente día disponible
       if (!primerDia) {
         const nextDays = getNextDays(4);
+        const { data: bAll } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
         for (const day of nextDays) {
           const dayName = DAY_MAP[day.getDay()];
-          const tieneBarbe = barberos?.some(b => {
+          const tieneBarbe = bAll?.some(b => {
             const schedule = Array.isArray(b.schedule) ? b.schedule : [];
             return schedule.some(d => d.replace('á','a').replace('é','e') === dayName.replace('á','a').replace('é','e'));
           });
@@ -870,9 +865,37 @@ app.post('/webhook', async (req, res) => {
       if (primerDia) {
         conversationState[from] = { step: 'esperando_seleccion', fecha: primerDia, fechaLabel: primerDiaLabel };
       }
+    }
 
+    // ── Si está esperando confirmación de si quiere cita ─────────────────────
+    if (state?.step === 'esperando_confirmacion_cita') {
+      if (quiereCita || esAgendar) {
+        await prepararFechaYGuardarState();
+        const disponibilidadMsg = await buildDisponibilidadMsg();
+        await chakraSendSession(from, `¡Perfecto! 💈 Aquí tienes los horarios disponibles:\n\n${disponibilidadMsg}`);
+      } else {
+        delete conversationState[from];
+        await chakraSendSession(from, `¡Claro! Si en algún momento deseas vivir la experiencia IMPERIUM, aquí estaremos. 🫡`);
+      }
+      return;
+    }
+
+    // ── Hola / información general → mensaje de bienvenida ───────────────────
+    if (esHola && !esAgendar) {
+      conversationState[from] = { step: 'esperando_confirmacion_cita' };
+      await chakraSendSession(from,
+        `¡Hola! Gracias por contactar a *IMPERIUM CAESARS Barber Club*. 💈\n\n` +
+        `Te ayudamos a proyectar una mejor imagen a través de una experiencia de cuidado personal diseñada para caballeros, que incluye *asesoría de imagen*, *lavado de cabello*, *bebida de cortesía* y nuestras exclusivas *Manos del Emperador*.\n\n` +
+        `¿Te reservo algún espacio para vivir la experiencia IMPERIUM?`
+      );
+      return;
+    }
+
+    // ── Quiere agendar directamente ───────────────────────────────────────────
+    if (esHola || esAgendar) {
+      await prepararFechaYGuardarState();
       const disponibilidadMsg = await buildDisponibilidadMsg();
-      await chakraSendSession(from, `¡Hola ${firstName}! 👋 Bienvenido a *Imperium Caesar's Barber Club* 💈\n\n${disponibilidadMsg}`);
+      await chakraSendSession(from, `¡Hola! 👋 Bienvenido a *Imperium Caesar's Barber Club* 💈\n\n${disponibilidadMsg}`);
       return;
     }
 
