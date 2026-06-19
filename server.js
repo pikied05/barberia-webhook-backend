@@ -634,6 +634,126 @@ async function prepararFechaYGuardarState(from) {
   return { primerDia, primerDiaLabel };
 }
 
+// ─── Función para obtener o crear servicio ──────────────────────────────────
+
+async function obtenerOCrearServicio(nombreBuscado = null) {
+  // Si se especificó un nombre, intentar encontrarlo
+  if (nombreBuscado) {
+    const nombreNormalizado = normalizarTexto(nombreBuscado);
+    const { data: servicios } = await supabase
+      .from('services')
+      .select('id, name')
+      .eq('active', true);
+
+    for (const servicio of (servicios || [])) {
+      if (normalizarTexto(servicio.name).includes(nombreNormalizado) || 
+          nombreNormalizado.includes(normalizarTexto(servicio.name))) {
+        return servicio;
+      }
+    }
+  }
+
+  // Si no se encontró o no se especificó, buscar "Corte Premium"
+  const { data: premiumService } = await supabase
+    .from('services')
+    .select('id, name')
+    .ilike('name', '%corte premium%')
+    .eq('active', true)
+    .maybeSingle();
+
+  if (premiumService) {
+    return premiumService;
+  }
+
+  // Si no existe "Corte Premium", buscar cualquier servicio activo
+  const { data: anyService } = await supabase
+    .from('services')
+    .select('id, name')
+    .eq('active', true)
+    .limit(1)
+    .maybeSingle();
+
+  if (anyService) {
+    return anyService;
+  }
+
+  // Si no hay servicios, crear "Corte Premium"
+  const { data: newService, error } = await supabase
+    .from('services')
+    .insert([{
+      name: 'Corte Premium',
+      description: 'Corte con lavado, asesoría de imagen y bebida de cortesía',
+      price: 350,
+      duration_minutes: 60,
+      active: true,
+    }])
+    .select()
+    .single();
+
+  if (!error && newService) {
+    console.log(`✅ Servicio creado automáticamente: ${newService.name}`);
+    return newService;
+  }
+
+  console.error('❌ Error al crear servicio por defecto:', error?.message);
+  return null;
+}
+
+// ─── Función para obtener o crear cliente ───────────────────────────────────
+
+async function obtenerOCrearCliente(phone, name = null) {
+  const digits10 = phone.replace(/^52/, '').slice(-10);
+  
+  // Buscar cliente existente
+  const { data: existingClient } = await supabase
+    .from('clients')
+    .select('id, name, phone')
+    .or(`phone.ilike.%${digits10}%`)
+    .maybeSingle();
+
+  if (existingClient) {
+    return existingClient;
+  }
+
+  // Crear nuevo cliente
+  const nombreCliente = name || 'Cliente WhatsApp';
+  const { data: newClient, error } = await supabase
+    .from('clients')
+    .insert([{
+      name: nombreCliente,
+      phone: digits10,
+      created_at: new Date().toISOString(),
+    }])
+    .select()
+    .single();
+
+  if (error) {
+    console.error('❌ Error creando cliente:', error.message);
+    return null;
+  }
+
+  console.log(`✅ Cliente creado: ${newClient.name} (${newClient.phone})`);
+  return newClient;
+}
+
+// ─── Función para extraer servicio del mensaje ──────────────────────────────
+
+function extraerServicioDelMensaje(text) {
+  const palabrasClave = ['corte', 'barba', 'afeitado', 'premium', 'clásico', 'ejecutivo', 'especial', 'tinte', 'cejas', 'perfilado'];
+  const textoLower = text.toLowerCase();
+  
+  for (const palabra of palabrasClave) {
+    if (textoLower.includes(palabra)) {
+      // Buscar la frase completa que contiene la palabra clave
+      const match = text.match(new RegExp(`([a-záéíóúñA-ZÁÉÍÓÚÑ\\s]+${palabra}[a-záéíóúñA-ZÁÉÍÓÚÑ\\s]+)`, 'i'));
+      if (match) {
+        return match[0].trim();
+      }
+    }
+  }
+  return null;
+}
+
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
 
@@ -700,7 +820,7 @@ app.post('/webhook', async (req, res) => {
     // 🔴 AUTOMATIZACIÓN DESACTIVADA TEMPORALMENTE
     // Cambiar AUTOMATION_ENABLED a true para reactivar el bot.
     // ══════════════════════════════════════════════════════════════════════════
-    const AUTOMATION_ENABLED = false;
+    const AUTOMATION_ENABLED = true;
     if (!AUTOMATION_ENABLED) {
       console.log(`⏸️ Automatización desactivada — mensaje de ${from} ignorado`);
       return;
@@ -807,7 +927,8 @@ app.post('/webhook', async (req, res) => {
         return;
       }
 
-      const { client } = await getClienteYCita(from);
+      // ✅ Extraer servicio del mensaje
+      const servicioSolicitado = extraerServicioDelMensaje(text);
       const digits10 = from.replace(/^52/, '').slice(-10);
 
       if (disponibles.length === 1) {
@@ -817,11 +938,12 @@ app.post('/webhook', async (req, res) => {
           barberoId: barbero.id, barberoName: barbero.name,
           fecha: state.fecha, fechaLabel: state.fechaLabel,
           hora: horaSolicitada,
-          clientId: client?.id, clientName: client?.name || 'Cliente', clientPhone: digits10,
+          clientPhone: digits10,
+          serviceName: servicioSolicitado || 'Corte Premium',
         };
         await chakraSendSession(from,
           `✅ *${barbero.name}* está libre a las *${horaSolicitada}* el *${state.fechaLabel}*.\n\n` +
-          `📋 *Resumen de tu cita:*\n👤 Barbero: *${barbero.name}*\n📅 Fecha: *${state.fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n\n` +
+          `📋 *Resumen de tu cita:*\n👤 Barbero: *${barbero.name}*\n📅 Fecha: *${state.fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n💇 Servicio: *${servicioSolicitado || 'Corte Premium'}*\n\n` +
           `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
         );
         return;
@@ -830,7 +952,9 @@ app.post('/webhook', async (req, res) => {
       conversationState[from] = { 
         step: 'esperando_seleccion', 
         fecha: state.fecha, 
-        fechaLabel: state.fechaLabel 
+        fechaLabel: state.fechaLabel,
+        serviceName: servicioSolicitado || 'Corte Premium',
+        clientPhone: digits10,
       };
       
       const nombres = disponibles.map(b => `*${b.name}*`).join(', ');
@@ -872,7 +996,7 @@ app.post('/webhook', async (req, res) => {
           return;
         }
         
-        const { client } = await getClienteYCita(from);
+        const servicioSolicitado = extraerServicioDelMensaje(text) || state.serviceName || 'Corte Premium';
         const digits10 = from.replace(/^52/, '').slice(-10);
         
         conversationState[from] = {
@@ -880,12 +1004,17 @@ app.post('/webhook', async (req, res) => {
           barberoId: barberoAsignado.id, barberoName: barberoAsignado.name,
           fecha: state.fecha, fechaLabel: state.fechaLabel,
           hora: horaAsignada,
-          clientId: client?.id, clientName: client?.name || 'Cliente', clientPhone: digits10,
+          clientPhone: state.clientPhone || digits10,
+          serviceName: servicioSolicitado,
         };
         
         await chakraSendSession(from,
           `👍 Te asignamos a *${barberoAsignado.name}* a las *${horaAsignada}* el *${state.fechaLabel}*.\n\n` +
-          `📋 *Resumen de tu cita:*\n👤 Barbero: *${barberoAsignado.name}*\n📅 Fecha: *${state.fechaLabel}*\n🕐 Hora: *${horaAsignada}*\n\n` +
+          `📋 *Resumen de tu cita:*\n` +
+          `👤 Barbero: *${barberoAsignado.name}*\n` +
+          `📅 Fecha: *${state.fechaLabel}*\n` +
+          `🕐 Hora: *${horaAsignada}*\n` +
+          `💇 Servicio: *${servicioSolicitado}*\n\n` +
           `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
         );
         return;
@@ -937,18 +1066,19 @@ app.post('/webhook', async (req, res) => {
           return;
         }
 
+        // ✅ Extraer servicio del mensaje
+        const servicioSolicitado = extraerServicioDelMensaje(text) || state.serviceName || 'Corte Premium';
+
         // ✅ BUSCAR BARBERO CON NORMALIZACIÓN DE ACENTOS
         const nombreBuscado = normalizarTexto(matchNombreHora.nombre);
         const { data: barberos } = await supabase.from('barbers').select('id, name').eq('active', true);
 
-        // Buscar barbero comparando nombres normalizados (sin acentos)
         const barbero = barberos?.find(b => {
           const nombreBarbero = normalizarTexto(b.name);
           return nombreBarbero.includes(nombreBuscado) || nombreBuscado.includes(nombreBarbero);
         });
 
         if (!barbero) {
-          // Si no encontró el barbero, mostrar los disponibles para que el cliente elija
           const nombresDisponibles = barberos?.map(b => `*${b.name}*`).join(', ') || 'ninguno';
           await chakraSendSession(from, 
             `No encontré al barbero "${matchNombreHora.nombre}" 🤔\n` +
@@ -970,7 +1100,6 @@ app.post('/webhook', async (req, res) => {
           return;
         }
 
-        const { client } = await getClienteYCita(from);
         const digits10 = from.replace(/^52/, '').slice(-10);
 
         conversationState[from] = {
@@ -978,14 +1107,16 @@ app.post('/webhook', async (req, res) => {
           barberoId: barbero.id, barberoName: barbero.name,
           fecha: state.fecha, fechaLabel: state.fechaLabel,
           hora: horaSolicitada,
-          clientId: client?.id, clientName: client?.name || 'Cliente', clientPhone: digits10,
+          clientPhone: state.clientPhone || digits10,
+          serviceName: servicioSolicitado,
         };
 
         await chakraSendSession(from,
           `📋 *Resumen de tu cita:*\n\n` +
           `👤 Barbero: *${barbero.name}*\n` +
           `📅 Fecha: *${state.fechaLabel}*\n` +
-          `🕐 Hora: *${horaSolicitada}*\n\n` +
+          `🕐 Hora: *${horaSolicitada}*\n` +
+          `💇 Servicio: *${servicioSolicitado}*\n\n` +
           `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
         );
         return;
@@ -1036,8 +1167,8 @@ app.post('/webhook', async (req, res) => {
           return;
         }
 
+        const servicioSolicitado = extraerServicioDelMensaje(text) || state.serviceName || 'Corte Premium';
         const barberoAsignado = disponibles[Math.floor(Math.random() * disponibles.length)];
-        const { client } = await getClienteYCita(from);
         const digits10 = from.replace(/^52/, '').slice(-10);
 
         conversationState[from] = {
@@ -1045,12 +1176,13 @@ app.post('/webhook', async (req, res) => {
           barberoId: barberoAsignado.id, barberoName: barberoAsignado.name,
           fecha: state.fecha, fechaLabel: state.fechaLabel,
           hora: horaSolicitada,
-          clientId: client?.id, clientName: client?.name || 'Cliente', clientPhone: digits10,
+          clientPhone: state.clientPhone || digits10,
+          serviceName: servicioSolicitado,
         };
 
         await chakraSendSession(from,
           `✅ ¡Perfecto! Te asignamos con *${barberoAsignado.name}* a las *${horaSolicitada}* el *${state.fechaLabel}*.\n\n` +
-          `📋 *Resumen de tu cita:*\n👤 Barbero: *${barberoAsignado.name}*\n📅 Fecha: *${state.fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n\n` +
+          `📋 *Resumen de tu cita:*\n👤 Barbero: *${barberoAsignado.name}*\n📅 Fecha: *${state.fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n💇 Servicio: *${servicioSolicitado}*\n\n` +
           `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
         );
         return;
@@ -1066,19 +1198,54 @@ app.post('/webhook', async (req, res) => {
       const cancela  = ['no', 'cancelar', 'cancel', '2'].some(k => textLower.includes(k));
 
       if (confirma) {
+        // ── Paso 1: Obtener o crear el cliente ──────────────────────────────
+        const digits10 = from.replace(/^52/, '').slice(-10);
+        const cliente = await obtenerOCrearCliente(digits10, state.clientName || null);
+
+        if (!cliente) {
+          await chakraSendSession(from, `Hubo un error al registrar tus datos 😔 Por favor llámanos directamente.`);
+          delete conversationState[from];
+          return;
+        }
+
+        // ── Paso 2: Obtener o crear el servicio ─────────────────────────────
+        const servicio = await obtenerOCrearServicio(state.serviceName || 'Corte Premium');
+
+        if (!servicio) {
+          await chakraSendSession(from, `Hubo un error al obtener el servicio 😔 Por favor llámanos directamente.`);
+          delete conversationState[from];
+          return;
+        }
+
+        // ── Paso 3: Crear la cita ────────────────────────────────────────────
         const endTime = (() => {
           const [h, m] = state.hora.split(':').map(Number);
           const end = h * 60 + m + 60;
           return `${String(Math.floor(end / 60)).padStart(2, '0')}:${String(end % 60).padStart(2, '0')}`;
         })();
 
-        const { error } = await supabase.from('appointments').insert([{
-          client_id: state.clientId || null, client_name: state.clientName, client_phone: state.clientPhone,
-          barber_id: state.barberoId, barber_name: state.barberoName,
-          date: state.fecha, time: state.hora, status: 'pendiente',
-          whatsapp_sent: true, reminder_sent: false, duration_minutes: 60,
-          end_time: endTime, notes: 'Agendado por WhatsApp',
-        }]);
+        const citaData = {
+          client_id: cliente.id,
+          client_name: cliente.name,
+          client_phone: cliente.phone,
+          barber_id: state.barberoId,
+          barber_name: state.barberoName,
+          service_id: servicio.id,
+          date: state.fecha,
+          time: state.hora,
+          status: 'pendiente',
+          whatsapp_sent: true,
+          reminder_sent: false,
+          duration_minutes: 60,
+          end_time: endTime,
+          notes: `Agendado por WhatsApp. Servicio: ${servicio.name}`,
+        };
+
+        console.log('📝 Creando cita con datos:', JSON.stringify(citaData, null, 2));
+
+        const { error } = await supabase
+          .from('appointments')
+          .insert([citaData]);
 
         delete conversationState[from];
 
@@ -1088,9 +1255,15 @@ app.post('/webhook', async (req, res) => {
           return;
         }
 
-        console.log(`✅ Cita agendada vía WhatsApp: ${state.clientName} con ${state.barberoName} el ${state.fecha} a las ${state.hora}`);
+        console.log(`✅ Cita agendada vía WhatsApp: ${cliente.name} con ${state.barberoName} el ${state.fecha} a las ${state.hora}`);
         await chakraSendSession(from,
-          `✅ ¡Listo! Tu cita quedó agendada:\n\n👤 *${state.barberoName}*\n📅 *${state.fechaLabel}*\n🕐 *${state.hora}*\n\nTe esperamos en Imperium Caesar's Barber Club 💈`
+          `✅ ¡Listo! Tu cita quedó agendada:\n\n` +
+          `👤 Cliente: *${cliente.name}*\n` +
+          `👤 Barbero: *${state.barberoName}*\n` +
+          `📅 Fecha: *${state.fechaLabel}*\n` +
+          `🕐 Hora: *${state.hora}*\n` +
+          `💇 Servicio: *${servicio.name}*\n\n` +
+          `Te esperamos en Imperium Caesar's Barber Club 💈`
         );
       } else if (cancela) {
         delete conversationState[from];
