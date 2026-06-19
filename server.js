@@ -722,7 +722,9 @@ app.get('/test-disponibilidad', async (req, res) => {
 });
 
 app.get('/test-encuestas', async (req, res) => {
-  const yesterday = new Date();
+  // ✅ Calcular "ayer en México" (UTC-6)
+  const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
+  const yesterday = new Date(nowMX);
   yesterday.setDate(yesterday.getDate() - 1);
   const yesterdayStr = yesterday.toISOString().slice(0, 10);
   const { data: citas, error } = await supabase
@@ -807,7 +809,9 @@ async function enviarRecordatorios(etiqueta = '') {
 // ✅ FIX: ahora incluye citas 'pendiente' Y 'confirmada' (no solo confirmada)
 // porque muchos clientes asisten sin haber respondido el recordatorio.
 async function enviarEncuestas(etiqueta = '') {
-  const yesterday = new Date();
+  // ✅ Calcular "ayer en México" (UTC-6) para no adelantarse al día siguiente
+  const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
+  const yesterday = new Date(nowMX);
   yesterday.setDate(yesterday.getDate() - 1);
   const yesterdayStr = yesterday.toISOString().slice(0, 10);
   console.log(`⭐ [${etiqueta}] Enviando encuestas para citas del ${yesterdayStr}...`);
