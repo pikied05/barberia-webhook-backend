@@ -642,7 +642,7 @@ async function obtenerOCrearServicio(nombreBuscado = null) {
     const nombreNormalizado = normalizarTexto(nombreBuscado);
     const { data: servicios } = await supabase
       .from('services')
-      .select('id, name')
+      .select('id, name, price, duration_minutes')
       .eq('active', true);
 
     for (const servicio of (servicios || [])) {
@@ -656,7 +656,7 @@ async function obtenerOCrearServicio(nombreBuscado = null) {
   // Si no se encontró o no se especificó, buscar "Corte Premium"
   const { data: premiumService } = await supabase
     .from('services')
-    .select('id, name')
+    .select('id, name, price, duration_minutes')
     .ilike('name', '%corte premium%')
     .eq('active', true)
     .maybeSingle();
@@ -668,7 +668,7 @@ async function obtenerOCrearServicio(nombreBuscado = null) {
   // Si no existe "Corte Premium", buscar cualquier servicio activo
   const { data: anyService } = await supabase
     .from('services')
-    .select('id, name')
+    .select('id, name, price, duration_minutes')
     .eq('active', true)
     .limit(1)
     .maybeSingle();
@@ -820,7 +820,7 @@ app.post('/webhook', async (req, res) => {
     // 🔴 AUTOMATIZACIÓN DESACTIVADA TEMPORALMENTE
     // Cambiar AUTOMATION_ENABLED a true para reactivar el bot.
     // ══════════════════════════════════════════════════════════════════════════
-    const AUTOMATION_ENABLED = false;
+    const AUTOMATION_ENABLED = true;
     if (!AUTOMATION_ENABLED) {
       console.log(`⏸️ Automatización desactivada — mensaje de ${from} ignorado`);
       return;
@@ -927,7 +927,6 @@ app.post('/webhook', async (req, res) => {
         return;
       }
 
-      // ✅ Extraer servicio del mensaje
       const servicioSolicitado = extraerServicioDelMensaje(text);
       const digits10 = from.replace(/^52/, '').slice(-10);
 
@@ -1066,10 +1065,8 @@ app.post('/webhook', async (req, res) => {
           return;
         }
 
-        // ✅ Extraer servicio del mensaje
         const servicioSolicitado = extraerServicioDelMensaje(text) || state.serviceName || 'Corte Premium';
 
-        // ✅ BUSCAR BARBERO CON NORMALIZACIÓN DE ACENTOS
         const nombreBuscado = normalizarTexto(matchNombreHora.nombre);
         const { data: barberos } = await supabase.from('barbers').select('id, name').eq('active', true);
 
@@ -1224,6 +1221,9 @@ app.post('/webhook', async (req, res) => {
           return `${String(Math.floor(end / 60)).padStart(2, '0')}:${String(end % 60).padStart(2, '0')}`;
         })();
 
+        // ✅ Asegurar que el precio exista
+        const precio = servicio.price || 350;
+
         const citaData = {
           client_id: cliente.id,
           client_name: cliente.name,
@@ -1231,14 +1231,18 @@ app.post('/webhook', async (req, res) => {
           barber_id: state.barberoId,
           barber_name: state.barberoName,
           service_id: servicio.id,
+          service_name: servicio.name,
           date: state.fecha,
           time: state.hora,
           status: 'pendiente',
+          price: precio,
           whatsapp_sent: true,
           reminder_sent: false,
-          duration_minutes: 60,
+          duration_minutes: servicio.duration_minutes || 60,
           end_time: endTime,
           notes: `Agendado por WhatsApp. Servicio: ${servicio.name}`,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
         };
 
         console.log('📝 Creando cita con datos:', JSON.stringify(citaData, null, 2));
@@ -1251,6 +1255,7 @@ app.post('/webhook', async (req, res) => {
 
         if (error) {
           console.error('❌ Error creando cita desde WhatsApp:', error.message);
+          console.error('❌ Datos que causaron error:', JSON.stringify(citaData, null, 2));
           await chakraSendSession(from, `Hubo un error al agendar tu cita 😔 Por favor llámanos directamente.`);
           return;
         }
@@ -1262,7 +1267,8 @@ app.post('/webhook', async (req, res) => {
           `👤 Barbero: *${state.barberoName}*\n` +
           `📅 Fecha: *${state.fechaLabel}*\n` +
           `🕐 Hora: *${state.hora}*\n` +
-          `💇 Servicio: *${servicio.name}*\n\n` +
+          `💇 Servicio: *${servicio.name}*\n` +
+          `💰 Precio: *$${precio}*\n\n` +
           `Te esperamos en Imperium Caesar's Barber Club 💈`
         );
       } else if (cancela) {
