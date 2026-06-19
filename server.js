@@ -523,7 +523,7 @@ app.post('/webhook', async (req, res) => {
     // 🔴 AUTOMATIZACIÓN DESACTIVADA TEMPORALMENTE
     // Cambiar AUTOMATION_ENABLED a true para reactivar el bot.
     // ══════════════════════════════════════════════════════════════════════════
-    const AUTOMATION_ENABLED = false;
+    const AUTOMATION_ENABLED = true;
     if (!AUTOMATION_ENABLED) {
       console.log(`⏸️ Automatización desactivada — mensaje de ${from} ignorado`);
       return;
