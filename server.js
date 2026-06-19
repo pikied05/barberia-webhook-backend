@@ -634,7 +634,7 @@ async function prepararFechaYGuardarState(from) {
   return { primerDia, primerDiaLabel };
 }
 
-// ─── Función para obtener o crear servicio ──────────────────────────────────
+// ─── Función para obtener o crear servicio (CORREGIDA) ─────────────────────
 
 async function obtenerOCrearServicio(nombreBuscado = null) {
   // Si se especificó un nombre, intentar encontrarlo
@@ -642,7 +642,7 @@ async function obtenerOCrearServicio(nombreBuscado = null) {
     const nombreNormalizado = normalizarTexto(nombreBuscado);
     const { data: servicios } = await supabase
       .from('services')
-      .select('id, name, price, duration_minutes')
+      .select('id, name, price, duration')
       .eq('active', true);
 
     for (const servicio of (servicios || [])) {
@@ -656,7 +656,7 @@ async function obtenerOCrearServicio(nombreBuscado = null) {
   // Si no se encontró o no se especificó, buscar "Corte Premium"
   const { data: premiumService } = await supabase
     .from('services')
-    .select('id, name, price, duration_minutes')
+    .select('id, name, price, duration')
     .ilike('name', '%corte premium%')
     .eq('active', true)
     .maybeSingle();
@@ -668,7 +668,7 @@ async function obtenerOCrearServicio(nombreBuscado = null) {
   // Si no existe "Corte Premium", buscar cualquier servicio activo
   const { data: anyService } = await supabase
     .from('services')
-    .select('id, name, price, duration_minutes')
+    .select('id, name, price, duration')
     .eq('active', true)
     .limit(1)
     .maybeSingle();
@@ -682,10 +682,12 @@ async function obtenerOCrearServicio(nombreBuscado = null) {
     .from('services')
     .insert([{
       name: 'Corte Premium',
-      description: 'Corte con lavado, asesoría de imagen y bebida de cortesía',
       price: 350,
-      duration_minutes: 60,
+      duration: 60,
+      category: 'Corte',
       active: true,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
     }])
     .select()
     .single();
@@ -820,7 +822,7 @@ app.post('/webhook', async (req, res) => {
     // 🔴 AUTOMATIZACIÓN DESACTIVADA TEMPORALMENTE
     // Cambiar AUTOMATION_ENABLED a true para reactivar el bot.
     // ══════════════════════════════════════════════════════════════════════════
-    const AUTOMATION_ENABLED = false;
+    const AUTOMATION_ENABLED = true;
     if (!AUTOMATION_ENABLED) {
       console.log(`⏸️ Automatización desactivada — mensaje de ${from} ignorado`);
       return;
@@ -1238,7 +1240,7 @@ app.post('/webhook', async (req, res) => {
           price: precio,
           whatsapp_sent: true,
           reminder_sent: false,
-          duration_minutes: servicio.duration_minutes || 60,
+          duration_minutes: servicio.duration || 60,
           end_time: endTime,
           notes: `Agendado por WhatsApp. Servicio: ${servicio.name}`,
           created_at: new Date().toISOString(),
