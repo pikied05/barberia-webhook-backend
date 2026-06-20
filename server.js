@@ -260,36 +260,10 @@ async function buildDisponibilidadMsg() {
   }
 
   if (!hayDisponibilidad) {
-    // ✅ Si hoy ya no hay slots, buscar el siguiente día disponible automáticamente
-    const nextDays = getNextDays(6);
-    for (const day of nextDays) {
-      const dn = DAY_MAP[day.getDay()];
-      const barberosDay = barberos.filter(b => {
-        const schedule = Array.isArray(b.schedule) ? b.schedule : [];
-        return schedule.some(d =>
-          d.replace('á','a').replace('é','e') === dn.replace('á','a').replace('é','e')
-        );
-      });
-      if (!barberosDay.length) continue;
-
-      const dateStrDay = toYMD(day);
-      let msgFallback = `✂️ *Horarios disponibles — ${formatDateMX(day)}:*\n\n`;
-      let haySlots = false;
-
-      for (const barbero of barberosDay) {
-        const slots = await getSlotsLibres(barbero.id, dateStrDay, null);
-        const sel = splitSlots(slots);
-        if (!sel.length) continue;
-        haySlots = true;
-        msgFallback += `👤 *${barbero.name}:* ${sel.join(' · ')}\n`;
-      }
-
-      if (haySlots) {
-        msgFallback += `\n➡️ Responde con el *nombre del barbero* y la *hora*.\nEj: _Giovanni 10:00_\n\n💡 O solo manda la *hora* y te asignamos un barbero disponible.`;
-        return msgFallback;
-      }
+    if (esHoy) {
+      return '😔 Ya pasaron los horarios de hoy. Escríbenos para agendar mañana o en otro día. 💈';
     }
-    return '😔 No hay horarios disponibles en los próximos días. Escríbenos para ayudarte. 💈';
+    return '😔 No hay horarios disponibles hoy. Escríbenos para buscar una fecha alternativa.';
   }
 
   msg += `
@@ -1612,7 +1586,22 @@ app.post('/webhook', async (req, res) => {
     }
 
     const esConfirmacion = ['sí, confirmo', 'sí', 'si', 'confirmo', 'confirmar', '1', 'yes', 'ok', '✅'].some(k => textLower.includes(k));
-    const esCancelacion  = ['no puedo asistir', 'no', 'cancelar', 'cancelo', 'cancel', '2', 'cancelación'].some(k => textLower.includes(k));
+    // ✅ 'no' suelto eliminado — usamos match exacto para evitar falsos positivos
+    // como "no nada mas", "no gracias", "no me llames", etc.
+    const esCancelacion = (
+      textLower === 'no' ||
+      ['no puedo asistir', 'cancelar', 'cancelo', 'cancelación', 'cancel'].some(k => textLower.includes(k))
+    );
+
+    // ── Despedida amable ("no nada", "no gracias", "no nada mas") ────────────
+    // Detectar antes de llegar a cancelación de cita
+    const esDespedida = ['no nada', 'no gracias', 'nada mas', 'nada más', 'estoy bien', 'todo bien', 'ya es todo', 'eso es todo', 'hasta luego', 'bye', 'adiós', 'adios'].some(k => textLower.includes(k));
+    if (esDespedida) {
+      const { client: clientDespedida } = await getClienteYCita(from);
+      const nameDespedida = clientDespedida?.name?.split(' ')[0] || '';
+      await chakraSendSession(from, `¡Que tengas un excelente día${nameDespedida ? ' ' + nameDespedida : ''}! 😊 Cuando nos necesites aquí estaremos. 💈`);
+      return;
+    }
 
     if (!cita) {
       await chakraSendSession(from, `Hola ${firstName} 👋 No tienes citas próximas.\n\nEscribe *hola* para ver horarios y agendar una cita. 💈`);
