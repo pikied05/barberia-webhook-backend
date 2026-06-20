@@ -260,10 +260,39 @@ async function buildDisponibilidadMsg() {
   }
 
   if (!hayDisponibilidad) {
-    if (esHoy) {
-      return '😔 Ya pasaron los horarios de hoy. Escríbenos para agendar mañana o en otro día. 💈';
+    // ✅ Si hoy no hay slots, buscar el siguiente día disponible automáticamente
+    const nextDays = getNextDays(6);
+    for (const day of nextDays) {
+      const dn = DAY_MAP[day.getDay()];
+      const barberosDay = barberos.filter(b => {
+        const schedule = Array.isArray(b.schedule) ? b.schedule : [];
+        return schedule.some(d => d.replace('á','a').replace('é','e') === dn.replace('á','a').replace('é','e'));
+      });
+      if (!barberosDay.length) continue;
+
+      let msgFallback = `✂️ *Horarios disponibles — ${formatDateMX(day)}:*
+
+`;
+      let haySlots = false;
+      const dateStrDay = toYMD(day);
+      for (const barbero of barberosDay) {
+        const slots = await getSlotsLibres(barbero.id, dateStrDay, null);
+        const sel = splitSlots(slots);
+        if (!sel.length) continue;
+        haySlots = true;
+        msgFallback += `👤 *${barbero.name}:* ${sel.join(' · ')}
+`;
+      }
+      if (haySlots) {
+        msgFallback += `
+➡️ Responde con el *nombre del barbero* y la *hora*.
+Ej: _Giovanni 10:00_
+
+💡 O solo manda la *hora* y te asignamos un barbero disponible.`;
+        return msgFallback;
+      }
     }
-    return '😔 No hay horarios disponibles hoy. Escríbenos para buscar una fecha alternativa.';
+    return '😔 No hay horarios disponibles en los próximos días. Escríbenos para ayudarte. 💈';
   }
 
   msg += `
@@ -941,7 +970,7 @@ app.post('/webhook', async (req, res) => {
     // ══════════════════════════════════════════════════════════════════════════
     // 🔴 AUTOMATIZACIÓN ACTIVADA
     // ══════════════════════════════════════════════════════════════════════════
-    const AUTOMATION_ENABLED = false;
+    const AUTOMATION_ENABLED = true;
     if (!AUTOMATION_ENABLED) {
       console.log(`⏸️ Automatización desactivada — mensaje de ${from} ignorado`);
       return;
@@ -986,6 +1015,62 @@ app.post('/webhook', async (req, res) => {
     }
 
     // ── Esperando hora específica ────────────────────────────────────────────
+    // ── Paso: cliente ya eligió barbero, ahora manda la hora ────────────────────
+    if (state?.step === 'esperando_hora_con_barbero') {
+      const horaSolicitada = extraerHoraDeTexto(text);
+      if (!horaSolicitada || !ALL_SLOTS.includes(horaSolicitada)) {
+        await chakraSendSession(from, `No entendí la hora 😅
+Dime algo como *11:00*, *3 pm* o *15:00*, o escribe *cancelar*.`);
+        return;
+      }
+
+      const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
+      const esHoy = state.fecha === nowMX.toISOString().slice(0, 10);
+      const horaActual = esHoy ? nowMX.getHours() * 60 + nowMX.getMinutes() : null;
+
+      if (esHoy) {
+        const [h, m] = horaSolicitada.split(':').map(Number);
+        if (h * 60 + m <= horaActual) {
+          await chakraSendSession(from, `😅 La hora *${horaSolicitada}* ya pasó. Elige una hora futura.`);
+          return;
+        }
+      }
+
+      const slotsLibres = await getSlotsLibres(state.barberoId, state.fecha, horaActual);
+      if (!slotsLibres.includes(horaSolicitada)) {
+        await chakraSendSession(from, `😔 *${state.barberoName}* no está disponible a las *${horaSolicitada}*.
+Dime otra hora o escribe *cancelar*.`);
+        return;
+      }
+
+      const digits10 = from.replace(/^52/, '').slice(-10);
+      conversationState[from] = {
+        step: 'confirmando',
+        barberoId: state.barberoId, barberoName: state.barberoName,
+        fecha: state.fecha, fechaLabel: state.fechaLabel,
+        hora: horaSolicitada, horaSeleccionada: horaSolicitada,
+        clientPhone: digits10,
+        serviceName: 'Corte Premium',
+      };
+
+      await chakraSendSession(from,
+        `📋 *Resumen de tu cita:*
+
+` +
+        `👤 Barbero: *${state.barberoName}*
+` +
+        `📅 Fecha: *${state.fechaLabel}*
+` +
+        `🕐 Hora: *${horaSolicitada}*
+
+` +
+        `¿Confirmas?
+✅ Responde *SÍ* para agendar
+❌ Responde *NO* para cancelar`
+      );
+      return;
+    }
+
     if (state?.step === 'esperando_hora_especifica') {
       // Si menciona una fecha explícita ("sábado", "mañana", etc.), checar esa
       // fecha — y si también dio una hora en el mismo mensaje, ir directo a
@@ -1101,6 +1186,39 @@ app.post('/webhook', async (req, res) => {
 
     // ── Esperando selección ──────────────────────────────────────────────────
     if (state?.step === 'esperando_seleccion') {
+      // ✅ Si el cliente manda solo el nombre de un barbero sin hora, pedirle la hora
+      const soloNombreMatch = (() => {
+        // Es solo nombre si no tiene números ni hora
+        if (/\d/.test(text)) return null;
+        return text.trim();
+      })();
+
+      if (soloNombreMatch && soloNombreMatch.length > 2) {
+        const { data: barberos } = await supabase.from('barbers').select('id, name').eq('active', true);
+        const nombreNorm = normalizarTexto(soloNombreMatch);
+        const barberoEncontrado = barberos?.find(b =>
+          normalizarTexto(b.name).includes(nombreNorm) || nombreNorm.includes(normalizarTexto(b.name))
+        );
+        if (barberoEncontrado) {
+          // Guardar el barbero en el estado y pedir la hora
+          conversationState[from] = { ...state, step: 'esperando_hora_con_barbero', barberoId: barberoEncontrado.id, barberoName: barberoEncontrado.name };
+          const slots = await getSlotsLibres(barberoEncontrado.id, state.fecha, null);
+          const sel = splitSlots(slots);
+          const preview = sel.length ? sel.join(' · ') : 'sin disponibilidad';
+          await chakraSendSession(from,
+            `✅ *${barberoEncontrado.name}* seleccionado.
+
+` +
+            `🕐 ¿A qué hora?
+Algunos horarios disponibles: *${preview}*
+
+` +
+            `Dime la hora, ej: *11:00* o *3 pm*. O escribe *cancelar*.`
+          );
+          return;
+        }
+      }
+
       const fechaEnMensaje = parsearFechaPedida(text);
       if (fechaEnMensaje) {
         const yaRespondido = await confirmarHorarioPuntual(from, text, fechaEnMensaje, formatDateMX(fechaEnMensaje), state);
@@ -1575,7 +1693,8 @@ app.post('/webhook', async (req, res) => {
     }
 
     const esConfirmacion = ['sí, confirmo', 'sí', 'si', 'confirmo', 'confirmar', '1', 'yes', 'ok', '✅'].some(k => textLower.includes(k));
-    const esCancelacion  = ['no puedo asistir', 'no', 'cancelar', 'cancelo', 'cancel', '2', 'cancelación'].some(k => textLower.includes(k));
+    // ✅ 'no' suelto eliminado — causaba cancelar cita cuando el cliente decía "no" a otra pregunta
+    const esCancelacion  = ['no puedo asistir', 'cancelar', 'cancelo', 'cancel', 'cancelación'].some(k => textLower.includes(k));
 
     if (!cita) {
       await chakraSendSession(from, `Hola ${firstName} 👋 No tienes citas próximas.\n\nEscribe *hola* para ver horarios y agendar una cita. 💈`);
