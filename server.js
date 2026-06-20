@@ -260,36 +260,10 @@ async function buildDisponibilidadMsg() {
   }
 
   if (!hayDisponibilidad) {
-    // ✅ Sin slots hoy → buscar siguiente día disponible automáticamente
-    const nextDaysList = getNextDays(7);
-    for (const day of nextDaysList) {
-      const dn = DAY_MAP[day.getDay()];
-      const barberosDay = barberos.filter(b => {
-        const schedule = Array.isArray(b.schedule) ? b.schedule : [];
-        return schedule.some(d =>
-          d.replace('á','a').replace('é','e') === dn.replace('á','a').replace('é','e')
-        );
-      });
-      if (!barberosDay.length) continue;
-
-      const dateStrDay = toYMD(day);
-      let msgFallback = `✂️ *Horarios disponibles — ${formatDateMX(day)}:*\n\n`;
-      let haySlots = false;
-
-      for (const barbero of barberosDay) {
-        const slots = await getSlotsLibres(barbero.id, dateStrDay, null);
-        const sel = splitSlots(slots);
-        if (!sel.length) continue;
-        haySlots = true;
-        msgFallback += `👤 *${barbero.name}:* ${sel.join(' · ')}\n`;
-      }
-
-      if (haySlots) {
-        msgFallback += `\n➡️ Responde con el *nombre del barbero* y la *hora*.\nEj: _Giovanni 10:00_\n\n💡 O solo manda la *hora* y te asignamos un barbero disponible.`;
-        return msgFallback;
-      }
+    if (esHoy) {
+      return '😔 Ya pasaron los horarios de hoy. Escríbenos para agendar mañana o en otro día. 💈';
     }
-    return '😔 No hay horarios disponibles en los próximos días. Escríbenos para ayudarte. 💈';
+    return '😔 No hay horarios disponibles hoy. Escríbenos para buscar una fecha alternativa.';
   }
 
   msg += `
@@ -986,6 +960,21 @@ app.post('/webhook', async (req, res) => {
 
     const state = conversationState[from];
 
+    // ── Si el bot preguntó "¿hay algo más?" y el cliente responde ───────────
+    if (state?.step === 'esperando_respuesta_final') {
+      delete conversationState[from];
+      const esOtraConsulta = ['hola', 'sí', 'si', 'yes', 'agendar', 'cita', 'horario', 'precio', 'quiero'].some(k => textLower.includes(k));
+      if (esOtraConsulta) {
+        // Si quiere algo más, reiniciar flujo normalmente (caerá al bloque de hola/agendar abajo)
+      } else {
+        // "no", "no nada", "no gracias", "bye", etc. → despedida sin tocar la cita
+        const { client: clientFinal } = await getClienteYCita(from);
+        const nameFinal = clientFinal?.name?.split(' ')[0] || '';
+        await chakraSendSession(from, `¡Que tengas un excelente día${nameFinal ? ' ' + nameFinal : ''}! 😊 Cuando nos necesites aquí estaremos. 💈`);
+        return;
+      }
+    }
+
     if (state && ['cancelar', 'salir', 'cancel', 'exit'].some(k => textLower.includes(k))) {
       delete conversationState[from];
       const { client } = await getClienteYCita(from);
@@ -1550,7 +1539,9 @@ app.post('/webhook', async (req, res) => {
     const esGracias = ['gracias', 'muchas gracias', 'thank', 'thanks', '🙏'].some(k => textLower.includes(k));
     if (esGracias) {
       const { client } = await getClienteYCita(from);
-      await chakraSendSession(from, `¡Con gusto ${client?.name?.split(' ')[0] || ''}! 😊 ¿Hay algo más en lo que te pueda ayudar?`);
+      const nombreGracias = client?.name?.split(' ')[0] || '';
+      conversationState[from] = { step: 'esperando_respuesta_final' };
+      await chakraSendSession(from, `¡Con gusto ${nombreGracias}! 😊 ¿Hay algo más en lo que te pueda ayudar?`);
       return;
     }
 
