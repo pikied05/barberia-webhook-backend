@@ -109,6 +109,15 @@ const ALL_SLOTS = [
   '18:00','18:30','19:00','19:30',
 ];
 
+// Hora real de cierre (30 min después del último slot listado). Se usa para
+// validar que una cita de 60 min no se pase de la hora de cierre, SIN exigir
+// que el slot de cierre (20:00) esté también en ALL_SLOTS como horario
+// reservable — antes esa confusión hacía que 19:30 nunca apareciera disponible.
+const CIERRE_MINUTOS = (() => {
+  const [h, m] = ALL_SLOTS[ALL_SLOTS.length - 1].split(':').map(Number);
+  return h * 60 + m + 30;
+})();
+
 const DAY_MAP = { 0: 'Dom', 1: 'Lun', 2: 'Mar', 3: 'Mié', 4: 'Jue', 5: 'Vie', 6: 'Sáb' };
 
 function getNextDays(n = 5) {
@@ -175,11 +184,11 @@ async function getSlotsLibres(barberId, dateStr, filtroHoraActual = null) {
     const startTotal = h * 60 + m;
     for (let i = 0; i < 60; i += 30) {
       const needed = startTotal + i;
+      if (needed > CIERRE_MINUTOS) return false; // se pasaría de la hora de cierre
       const nh = String(Math.floor(needed / 60)).padStart(2, '0');
       const nm = String(needed % 60).padStart(2, '0');
       const neededSlot = `${nh}:${nm}`;
       if (slotsOcupados.has(neededSlot)) return false;
-      if (!ALL_SLOTS.includes(neededSlot)) return false;
     }
     return true;
   });
@@ -587,6 +596,117 @@ Ej: _15:00_ o _3 pm_`;
   await chakraSendSession(from, `${prefijo} Aquí tienes los horarios disponibles:\n\n${msgSlots}`);
 }
 
+// Extrae una hora de un texto libre. Solo reconoce formatos con alta confianza
+// (con ":", "am/pm" o "hrs") para no confundirse con números de día como "21".
+function extraerHoraDeTexto(text) {
+  const intentos = [
+    text.match(/(\d{1,2}):(\d{2})\s*(am|pm|a\.?m\.?|p\.?m\.?)?/i), // 5:00 pm / 17:00
+    text.match(/(\d{1,2})\s*(am|pm|a\.?m\.?|p\.?m\.?)/i),           // 5 pm
+    text.match(/(\d{1,2})\s*(?:hrs|horas|hora|hs)\b/i),             // 18 hrs
+  ];
+  const m = intentos.find(Boolean);
+  if (!m) return null;
+
+  let hour = parseInt(m[1], 10);
+  let minutes = /^\d+$/.test(m[2] || '') ? parseInt(m[2], 10) : 0;
+
+  const sufijo = (m[3] || m[2] || '').toString().toLowerCase().replace(/\./g, '');
+  let meridiano = '';
+  if (sufijo.includes('pm')) meridiano = 'pm';
+  if (sufijo.includes('am')) meridiano = 'am';
+
+  if (hour > 23 || minutes > 59) return null;
+  if (meridiano === 'pm' && hour < 12) hour += 12;
+  if (meridiano === 'am' && hour === 12) hour = 0;
+  if (!meridiano && hour < 10 && hour > 6) hour += 12; // sin sufijo y hora baja -> asumimos PM
+
+  return `${String(hour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+}
+
+// Cuando el cliente menciona fecha Y hora en el mismo mensaje (ej. "Sábado 10am"),
+// esto checa disponibilidad puntual directo en vez de solo mostrarle la lista
+// completa del día. Regresa true si ya mandó una respuesta (el caller debe
+// hacer `return` inmediatamente); regresa false si no había hora en el mensaje,
+// para que el caller siga con el flujo normal (mostrar la lista del día).
+async function confirmarHorarioPuntual(from, text, fechaDate, fechaLabel, state) {
+  const horaSolicitada = extraerHoraDeTexto(text);
+  if (!horaSolicitada) return false;
+
+  if (!ALL_SLOTS.includes(horaSolicitada)) {
+    await chakraSendSession(from, `😅 La hora *${horaSolicitada}* no está en nuestro horario (10:00 – 19:30).\nDime otra hora o escribe *cancelar*.`);
+    return true;
+  }
+
+  const dateStr = toYMD(fechaDate);
+  const dayName = DAY_MAP[fechaDate.getDay()];
+  const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
+  const esHoy = dateStr === nowMX.toISOString().slice(0, 10);
+  const horaActual = esHoy ? nowMX.getHours() * 60 + nowMX.getMinutes() : null;
+
+  if (esHoy) {
+    const [h, m] = horaSolicitada.split(':').map(Number);
+    if (h * 60 + m <= horaActual) {
+      await chakraSendSession(from, `😅 La hora *${horaSolicitada}* ya pasó. Por favor elige una hora futura.`);
+      return true;
+    }
+  }
+
+  const { data: barberos } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
+  const barberosDelDia = (barberos || []).filter(b => {
+    const schedule = Array.isArray(b.schedule) ? b.schedule : [];
+    return schedule.some(d => normalizarTexto(d) === normalizarTexto(dayName));
+  });
+
+  const disponibles = [];
+  for (const b of barberosDelDia) {
+    const slotsLibres = await getSlotsLibres(b.id, dateStr, esHoy ? horaActual : null);
+    if (slotsLibres.includes(horaSolicitada)) disponibles.push(b);
+  }
+
+  if (!disponibles.length) {
+    conversationState[from] = { step: 'esperando_hora_especifica', fecha: dateStr, fechaLabel };
+    await chakraSendSession(from,
+      `😔 A las *${horaSolicitada}* no tenemos a nadie libre el *${fechaLabel}*.\n¿Quieres intentar otra hora o fecha? Dime cuál, o escribe *cancelar*.`
+    );
+    return true;
+  }
+
+  const servicioSolicitado = extraerServicioDelMensaje(text) || state?.serviceName || 'Corte Premium';
+  const digits10 = from.replace(/^52/, '').slice(-10);
+
+  if (disponibles.length === 1) {
+    const barbero = disponibles[0];
+    conversationState[from] = {
+      step: 'confirmando',
+      barberoId: barbero.id, barberoName: barbero.name,
+      fecha: dateStr, fechaLabel,
+      hora: horaSolicitada, horaSeleccionada: horaSolicitada,
+      clientPhone: state?.clientPhone || digits10,
+      serviceName: servicioSolicitado,
+    };
+    await chakraSendSession(from,
+      `✅ *${barbero.name}* está libre a las *${horaSolicitada}* el *${fechaLabel}*.\n\n` +
+      `📋 *Resumen de tu cita:*\n👤 Barbero: *${barbero.name}*\n📅 Fecha: *${fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n💇 Servicio: *${servicioSolicitado}*\n\n` +
+      `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
+    );
+    return true;
+  }
+
+  conversationState[from] = {
+    step: 'esperando_seleccion',
+    fecha: dateStr, fechaLabel,
+    serviceName: servicioSolicitado,
+    clientPhone: state?.clientPhone || digits10,
+    horaSeleccionada: horaSolicitada,
+  };
+  const nombres = disponibles.map(b => `*${b.name}*`).join(', ');
+  await chakraSendSession(from,
+    `✅ A las *${horaSolicitada}* el *${fechaLabel}* tienes disponible a: ${nombres}.\n` +
+    `Responde con el *nombre del barbero* o escribe *cualquiera*.\nEj: _${disponibles[0].name}_ o _cualquiera_`
+  );
+  return true;
+}
+
 async function prepararFechaYGuardarState(from) {
   const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
   const todayDayName = DAY_MAP[nowMX.getDay()];
@@ -867,6 +987,17 @@ app.post('/webhook', async (req, res) => {
 
     // ── Esperando hora específica ────────────────────────────────────────────
     if (state?.step === 'esperando_hora_especifica') {
+      // Si menciona una fecha explícita ("sábado", "mañana", etc.), checar esa
+      // fecha — y si también dio una hora en el mismo mensaje, ir directo a
+      // confirmar disponibilidad puntual en vez de solo mostrar la lista.
+      const fechaEnMensaje = parsearFechaPedida(text);
+      if (fechaEnMensaje) {
+        const yaRespondido = await confirmarHorarioPuntual(from, text, fechaEnMensaje, formatDateMX(fechaEnMensaje), state);
+        if (yaRespondido) return;
+        await mostrarDisponibilidadEnFecha(from, fechaEnMensaje, '¡Claro!');
+        return;
+      }
+
       let horaMatch = text.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.?m\.?|p\.?m\.?)?/i);
       
       if (!horaMatch) {
@@ -972,6 +1103,8 @@ app.post('/webhook', async (req, res) => {
     if (state?.step === 'esperando_seleccion') {
       const fechaEnMensaje = parsearFechaPedida(text);
       if (fechaEnMensaje) {
+        const yaRespondido = await confirmarHorarioPuntual(from, text, fechaEnMensaje, formatDateMX(fechaEnMensaje), state);
+        if (yaRespondido) return;
         await mostrarDisponibilidadEnFecha(from, fechaEnMensaje, '¡Claro!');
         return;
       }
