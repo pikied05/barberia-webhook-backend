@@ -941,7 +941,7 @@ app.post('/webhook', async (req, res) => {
     // ══════════════════════════════════════════════════════════════════════════
     // 🔴 AUTOMATIZACIÓN ACTIVADA
     // ══════════════════════════════════════════════════════════════════════════
-    const AUTOMATION_ENABLED = true;
+    const AUTOMATION_ENABLED = false;
     if (!AUTOMATION_ENABLED) {
       console.log(`⏸️ Automatización desactivada — mensaje de ${from} ignorado`);
       return;
