@@ -634,7 +634,7 @@ async function prepararFechaYGuardarState(from) {
   return { primerDia, primerDiaLabel };
 }
 
-// ─── Función para obtener o crear servicio (CORREGIDA) ─────────────────────
+// ─── Función para obtener o crear servicio ──────────────────────────────────
 
 async function obtenerOCrearServicio(nombreBuscado = null) {
   // Si se especificó un nombre, intentar encontrarlo
@@ -819,8 +819,7 @@ app.post('/webhook', async (req, res) => {
     console.log(`📩 WhatsApp de ${from}: "${text}"`);
 
     // ══════════════════════════════════════════════════════════════════════════
-    // 🔴 AUTOMATIZACIÓN DESACTIVADA TEMPORALMENTE
-    // Cambiar AUTOMATION_ENABLED a true para reactivar el bot.
+    // 🔴 AUTOMATIZACIÓN ACTIVADA
     // ══════════════════════════════════════════════════════════════════════════
     const AUTOMATION_ENABLED = true;
     if (!AUTOMATION_ENABLED) {
@@ -939,6 +938,7 @@ app.post('/webhook', async (req, res) => {
           barberoId: barbero.id, barberoName: barbero.name,
           fecha: state.fecha, fechaLabel: state.fechaLabel,
           hora: horaSolicitada,
+          horaSeleccionada: horaSolicitada,
           clientPhone: digits10,
           serviceName: servicioSolicitado || 'Corte Premium',
         };
@@ -956,6 +956,7 @@ app.post('/webhook', async (req, res) => {
         fechaLabel: state.fechaLabel,
         serviceName: servicioSolicitado || 'Corte Premium',
         clientPhone: digits10,
+        horaSeleccionada: horaSolicitada,
       };
       
       const nombres = disponibles.map(b => `*${b.name}*`).join(', ');
@@ -981,14 +982,34 @@ app.post('/webhook', async (req, res) => {
         const esHoy = state.fecha === nowMX.toISOString().slice(0, 10);
         const horaActual = esHoy ? nowMX.getHours() * 60 + nowMX.getMinutes() : null;
         
+        // ✅ Buscar la hora que el cliente ya había seleccionado
+        let horaSeleccionada = state.horaSeleccionada || null;
+        
         let barberoAsignado = null;
         let horaAsignada = null;
-        for (const barbero of (barberos || [])) {
-          const slotsLibres = await getSlotsLibres(barbero.id, state.fecha, horaActual);
-          if (slotsLibres.length > 0) {
-            barberoAsignado = barbero;
-            horaAsignada = slotsLibres[0];
-            break;
+        
+        // Si el cliente ya tenía una hora seleccionada, buscar barbero disponible a esa hora
+        if (horaSeleccionada) {
+          for (const barbero of (barberos || [])) {
+            const slotsLibres = await getSlotsLibres(barbero.id, state.fecha, horaActual);
+            if (slotsLibres.includes(horaSeleccionada)) {
+              barberoAsignado = barbero;
+              horaAsignada = horaSeleccionada;
+              break;
+            }
+          }
+        }
+        
+        // Si no se encontró barbero a esa hora o no había hora seleccionada,
+        // asignar el primer barbero con el primer slot disponible
+        if (!barberoAsignado) {
+          for (const barbero of (barberos || [])) {
+            const slotsLibres = await getSlotsLibres(barbero.id, state.fecha, horaActual);
+            if (slotsLibres.length > 0) {
+              barberoAsignado = barbero;
+              horaAsignada = slotsLibres[0];
+              break;
+            }
           }
         }
         
@@ -1005,6 +1026,7 @@ app.post('/webhook', async (req, res) => {
           barberoId: barberoAsignado.id, barberoName: barberoAsignado.name,
           fecha: state.fecha, fechaLabel: state.fechaLabel,
           hora: horaAsignada,
+          horaSeleccionada: horaAsignada,
           clientPhone: state.clientPhone || digits10,
           serviceName: servicioSolicitado,
         };
@@ -1106,6 +1128,7 @@ app.post('/webhook', async (req, res) => {
           barberoId: barbero.id, barberoName: barbero.name,
           fecha: state.fecha, fechaLabel: state.fechaLabel,
           hora: horaSolicitada,
+          horaSeleccionada: horaSolicitada,
           clientPhone: state.clientPhone || digits10,
           serviceName: servicioSolicitado,
         };
@@ -1175,6 +1198,7 @@ app.post('/webhook', async (req, res) => {
           barberoId: barberoAsignado.id, barberoName: barberoAsignado.name,
           fecha: state.fecha, fechaLabel: state.fechaLabel,
           hora: horaSolicitada,
+          horaSeleccionada: horaSolicitada,
           clientPhone: state.clientPhone || digits10,
           serviceName: servicioSolicitado,
         };
@@ -1223,7 +1247,6 @@ app.post('/webhook', async (req, res) => {
           return `${String(Math.floor(end / 60)).padStart(2, '0')}:${String(end % 60).padStart(2, '0')}`;
         })();
 
-        // ✅ Asegurar que el precio exista
         const precio = servicio.price || 350;
 
         const citaData = {
@@ -1268,9 +1291,7 @@ app.post('/webhook', async (req, res) => {
           `👤 Cliente: *${cliente.name}*\n` +
           `👤 Barbero: *${state.barberoName}*\n` +
           `📅 Fecha: *${state.fechaLabel}*\n` +
-          `🕐 Hora: *${state.hora}*\n` +
-          `💇 Servicio: *${servicio.name}*\n` +
-          `💰 Precio: *$${precio}*\n\n` +
+          `🕐 Hora: *${state.hora}*\n\n` +
           `Te esperamos en Imperium Caesar's Barber Club 💈`
         );
       } else if (cancela) {
