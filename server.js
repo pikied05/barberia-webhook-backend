@@ -944,7 +944,7 @@ app.post('/webhook', async (req, res) => {
         };
         await chakraSendSession(from,
           `✅ *${barbero.name}* está libre a las *${horaSolicitada}* el *${state.fechaLabel}*.\n\n` +
-          `📋 *Resumen de tu cita:*\n👤 Barbero: *${barbero.name}*\n📅 Fecha: *${state.fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n💇 Servicio: *${servicioSolicitado || 'Corte Premium'}*\n\n` +
+          `📋 *Resumen de tu cita:*\n👤 Barbero: *${barbero.name}*\n📅 Fecha: *${state.fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n\n` +
           `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
         );
         return;
@@ -1306,6 +1306,92 @@ app.post('/webhook', async (req, res) => {
     // ══════════════════════════════════════════════════════════════════════════
     // RESPUESTAS GENERALES
     // ══════════════════════════════════════════════════════════════════════════
+    
+    // ── Preguntas sobre precios ──────────────────────────────────────────────
+    const esPreguntaPrecio = [
+      'precio', 'precios', 'cuesta', 'valor', 'tarifa', 'cuánto', 'cuanto', 
+      'costo', 'costos', 'presupuesto', '$', 'pesos', 'precio corte',
+      'precio barba', 'precio afeitado', 'cuanto cuesta', 'qué precio',
+      'lista de precios', 'menú de precios', 'carta de precios'
+    ].some(k => textLower.includes(k));
+
+    if (esPreguntaPrecio) {
+      // Obtener servicios activos de la base de datos
+      const { data: servicios, error } = await supabase
+        .from('services')
+        .select('name, price, duration, category')
+        .eq('active', true)
+        .order('category', { ascending: true });
+
+      let mensajePrecios = `💰 *Lista de Precios - Imperium Caesar's Barber Club* 💈\n\n`;
+
+      if (error || !servicios || servicios.length === 0) {
+        mensajePrecios += 
+          `✂️ *Corte de Cabello*: $350\n` +
+          `🧔 *Arreglo de Barba*: $250\n` +
+          `💈 *Corte + Barba*: $550\n` +
+          `🪒 *Afeitado Clásico*: $300\n` +
+          `✨ *Tratamiento Especial*: $400\n\n` +
+          `📞 Para más información, llámanos al (55) XXXX-XXXX`;
+      } else {
+        const categorias = {};
+        for (const servicio of servicios) {
+          const cat = servicio.category || 'Otros';
+          if (!categorias[cat]) categorias[cat] = [];
+          categorias[cat].push(servicio);
+        }
+
+        for (const [categoria, items] of Object.entries(categorias)) {
+          mensajePrecios += `*${categoria}:*\n`;
+          for (const item of items) {
+            const duracion = item.duration ? ` (${item.duration} min)` : '';
+            mensajePrecios += `  • ${item.name}${duracion}: *$${item.price}*\n`;
+          }
+          mensajePrecios += '\n';
+        }
+
+        mensajePrecios += 
+          `💳 Aceptamos efectivo y tarjetas.\n` +
+          `📅 Recuerda que puedes agendar tu cita escribiendo *hola*.\n\n` +
+          `¿Te gustaría reservar un espacio?`;
+      }
+
+      await chakraSendSession(from, mensajePrecios);
+      return;
+    }
+
+    // ── Encuesta pendiente ────────────────────────────────────────────────────
+    const encuestaPendiente = await getEncuestaPendiente(from);
+    if (encuestaPendiente) {
+      const { client: clienteEncuesta } = await getClienteYCita(from);
+      const firstNameEncuesta = clienteEncuesta?.name?.split(' ')[0] || 'amigo';
+      await supabase.from('appointments').update({
+        survey_feedback: text,
+        survey_responded_at: new Date().toISOString(),
+      }).eq('id', encuestaPendiente.id);
+      await chakraSendSession(from,
+        `¡Muchas gracias por contarnos, ${firstNameEncuesta}! 🙏 Tomamos en cuenta tu comentario para seguir mejorando.`
+      );
+      console.log(`⭐ Encuesta respondida: cita ${encuestaPendiente.id}`);
+      return;
+    }
+
+    // ── Gracias ───────────────────────────────────────────────────────────────
+    const esGracias = ['gracias', 'muchas gracias', 'thank', 'thanks', '🙏'].some(k => textLower.includes(k));
+    if (esGracias) {
+      const { client } = await getClienteYCita(from);
+      await chakraSendSession(from, `¡Con gusto ${client?.name?.split(' ')[0] || ''}! 😊 ¿Hay algo más en lo que te pueda ayudar?`);
+      return;
+    }
+
+    // ── Mensaje largo o pregunta compleja → derivar a humano ─────────────────
+    const esMensajeLargo   = text.length > 80;
+    const esPreguntaComple = (text.match(/\?/g) || []).length > 1 || (text.length > 50 && text.includes('?'));
+    if (esMensajeLargo || esPreguntaComple) {
+      await chakraSendSession(from, `Hola 👋 Recibimos tu mensaje. Un momento, pronto te atendemos personalmente. 💈`);
+      return;
+    }
+
 
     const encuestaPendiente = await getEncuestaPendiente(from);
     if (encuestaPendiente) {
