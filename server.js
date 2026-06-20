@@ -260,10 +260,33 @@ async function buildDisponibilidadMsg() {
   }
 
   if (!hayDisponibilidad) {
-    if (esHoy) {
-      return '😔 Ya pasaron los horarios de hoy. Escríbenos para agendar mañana o en otro día. 💈';
+    // ✅ Sin slots → buscar siguiente día disponible automáticamente
+    const nextDaysList = getNextDays(7);
+    for (const day of nextDaysList) {
+      const dn = DAY_MAP[day.getDay()];
+      const barberosDay = barberos.filter(b => {
+        const schedule = Array.isArray(b.schedule) ? b.schedule : [];
+        return schedule.some(d =>
+          d.replace('á','a').replace('é','e') === dn.replace('á','a').replace('é','e')
+        );
+      });
+      if (!barberosDay.length) continue;
+      const dateStrDay = toYMD(day);
+      let msgFallback = `✂️ *Horarios disponibles — ${formatDateMX(day)}:*\n\n`;
+      let haySlots = false;
+      for (const barbero of barberosDay) {
+        const slots = await getSlotsLibres(barbero.id, dateStrDay, null);
+        const sel = splitSlots(slots);
+        if (!sel.length) continue;
+        haySlots = true;
+        msgFallback += `👤 *${barbero.name}:* ${sel.join(' · ')}\n`;
+      }
+      if (haySlots) {
+        msgFallback += `\n➡️ Responde con el *nombre del barbero* y la *hora*.\nEj: _Giovanni 10:00_\n\n💡 O solo manda la *hora* y te asignamos un barbero disponible.`;
+        return msgFallback;
+      }
     }
-    return '😔 No hay horarios disponibles hoy. Escríbenos para buscar una fecha alternativa.';
+    return '😔 No hay horarios disponibles en los próximos días. Escríbenos para ayudarte. 💈';
   }
 
   msg += `
