@@ -944,7 +944,7 @@ app.post('/webhook', async (req, res) => {
         };
         await chakraSendSession(from,
           `✅ *${barbero.name}* está libre a las *${horaSolicitada}* el *${state.fechaLabel}*.\n\n` +
-          `📋 *Resumen de tu cita:*\n👤 Barbero: *${barbero.name}*\n📅 Fecha: *${state.fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n\n` +
+          `📋 *Resumen de tu cita:*\n👤 Barbero: *${barbero.name}*\n📅 Fecha: *${state.fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n💇 Servicio: *${servicioSolicitado || 'Corte Premium'}*\n\n` +
           `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
         );
         return;
@@ -1306,7 +1306,7 @@ app.post('/webhook', async (req, res) => {
     // ══════════════════════════════════════════════════════════════════════════
     // RESPUESTAS GENERALES
     // ══════════════════════════════════════════════════════════════════════════
-    
+
     // ── Preguntas sobre precios ──────────────────────────────────────────────
     const esPreguntaPrecio = [
       'precio', 'precios', 'cuesta', 'valor', 'tarifa', 'cuánto', 'cuanto', 
@@ -1385,36 +1385,6 @@ app.post('/webhook', async (req, res) => {
     }
 
     // ── Mensaje largo o pregunta compleja → derivar a humano ─────────────────
-    const esMensajeLargo   = text.length > 80;
-    const esPreguntaComple = (text.match(/\?/g) || []).length > 1 || (text.length > 50 && text.includes('?'));
-    if (esMensajeLargo || esPreguntaComple) {
-      await chakraSendSession(from, `Hola 👋 Recibimos tu mensaje. Un momento, pronto te atendemos personalmente. 💈`);
-      return;
-    }
-
-
-    const encuestaPendiente = await getEncuestaPendiente(from);
-    if (encuestaPendiente) {
-      const { client: clienteEncuesta } = await getClienteYCita(from);
-      const firstNameEncuesta = clienteEncuesta?.name?.split(' ')[0] || 'amigo';
-      await supabase.from('appointments').update({
-        survey_feedback: text,
-        survey_responded_at: new Date().toISOString(),
-      }).eq('id', encuestaPendiente.id);
-      await chakraSendSession(from,
-        `¡Muchas gracias por contarnos, ${firstNameEncuesta}! 🙏 Tomamos en cuenta tu comentario para seguir mejorando.`
-      );
-      console.log(`⭐ Encuesta respondida: cita ${encuestaPendiente.id}`);
-      return;
-    }
-
-    const esGracias = ['gracias', 'muchas gracias', 'thank', 'thanks', '🙏'].some(k => textLower.includes(k));
-    if (esGracias) {
-      const { client } = await getClienteYCita(from);
-      await chakraSendSession(from, `¡Con gusto ${client?.name?.split(' ')[0] || ''}! 😊 ¿Hay algo más en lo que te pueda ayudar?`);
-      return;
-    }
-
     const esMensajeLargo   = text.length > 80;
     const esPreguntaComple = (text.match(/\?/g) || []).length > 1 || (text.length > 50 && text.includes('?'));
     if (esMensajeLargo || esPreguntaComple) {
