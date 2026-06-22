@@ -1527,7 +1527,7 @@ app.post('/webhook', async (req, res) => {
           mensajePrecios += `*${categoria}:*\n`;
           for (const item of items) {
             const duracion = item.duration ? ` (${item.duration} min)` : '';
-            mensajePrecios += `  • ${item.name}${duracion}: *$${item.price}*\n`;
+            mensajePrecios += `  • ${item.name}: *$${item.price}*\n`;
           }
           mensajePrecios += '\n';
         }
