@@ -44,6 +44,31 @@ const TEMPLATE_LANGUAGE_CANDIDATES = {
   barberia_reenganche:        ['en', 'en_GB', 'en_US', 'es_MX'],
 };
 
+// ─── Plantillas que respetan el opt-out de mensajes automatizados ────────────
+// Si un cliente tiene no_automated_messages = true en Supabase, estas plantillas
+// NO se le envían (recordatorio, confirmación y reenganche). Cupón/ticket/encuesta
+// no están incluidos porque no fueron parte de lo solicitado.
+const AUTOMATED_TEMPLATES = [
+  'barberia_recordatorio_24h',
+  'barberia_confirmacion_cita',
+  'barberia_reenganche',
+];
+
+// Verifica si un cliente (por teléfono) optó por no recibir mensajes automatizados
+async function clienteOptoPorNoMensajes(phone) {
+  if (!phone) return false;
+  const digits10 = normalizePhone(phone).slice(-10);
+  const { data, error } = await supabase
+    .from('clients')
+    .select('no_automated_messages')
+    .ilike('phone', `%${digits10}%`);
+  if (error) {
+    console.error('⚠️ Error verificando opt-out de mensajes:', error.message);
+    return false; // ante la duda, no bloquear el envío por un error de lectura
+  }
+  return (data || []).some(c => c.no_automated_messages === true);
+}
+
 // ─── Helpers de Chakra ────────────────────────────────────────────────────────
 
 function normalizePhone(raw = '') {
@@ -371,6 +396,15 @@ app.post('/chakra-send', async (req, res) => {
 app.post('/chakra-send-template', async (req, res) => {
   const { to, templateName, variables = [] } = req.body;
   if (!to || !templateName) return res.status(400).json({ success: false, error: 'Faltan to o templateName' });
+
+  if (AUTOMATED_TEMPLATES.includes(templateName)) {
+    const optoPorNoMensajes = await clienteOptoPorNoMensajes(to);
+    if (optoPorNoMensajes) {
+      console.log(`🚫 Mensaje automatizado "${templateName}" bloqueado para ${to} — el cliente desactivó los mensajes automatizados`);
+      return res.json({ success: true, skipped: true, reason: 'cliente_opto_por_no_mensajes' });
+    }
+  }
+
   try {
     await chakraSendTemplate(to, templateName, variables);
     res.json({ success: true });
@@ -1859,6 +1893,13 @@ async function enviarRecordatorios(etiqueta = '') {
 
   for (const cita of citas) {
     if (!cita.client_phone) { console.warn(`⚠️ Cita ${cita.id} sin teléfono`); continue; }
+
+    const optoPorNoMensajes = await clienteOptoPorNoMensajes(cita.client_phone);
+    if (optoPorNoMensajes) {
+      console.log(`🚫 ${cita.client_name} desactivó los mensajes automatizados, se omite el recordatorio`);
+      continue;
+    }
+
     try {
       await chakraSendTemplate(cita.client_phone, 'barberia_recordatorio_24h', [
         cita.client_name?.split(' ')[0] ?? 'Cliente',
