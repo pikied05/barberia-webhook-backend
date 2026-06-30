@@ -547,7 +547,9 @@ function parsearFechaPedida(txt) {
     if (palabras.some(p => t.includes(p))) {
       const d = new Date(nowMX);
       let diff = idx - d.getDay();
-      if (diff <= 0) diff += 7;
+      // Si el día pedido es el mismo que hoy, se interpreta como "hoy",
+      // no como el mismo día de la próxima semana.
+      if (diff < 0) diff += 7;
       d.setDate(d.getDate() + diff);
       return d;
     }
