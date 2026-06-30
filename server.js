@@ -532,6 +532,9 @@ function parsearFechaPedida(txt) {
   if (t.includes('manana') || t.includes('mañana')) {
     const d = new Date(nowMX); d.setDate(d.getDate() + 1); return d;
   }
+  if (t.includes('hoy')) {
+    return new Date(nowMX);
+  }
 
   const diasMap = [
     { palabras: ['miercoles'], idx: 3 },
