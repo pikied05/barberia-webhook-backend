@@ -1519,7 +1519,19 @@ app.post('/webhook', async (req, res) => {
         delete conversationState[from];
         await chakraSendSession(from, `Entendido, cancelé el proceso. Escríbeme *hola* cuando quieras agendar 👍`);
       } else {
-        await chakraSendSession(from, `Responde *SÍ* para confirmar tu cita o *NO* para cancelar.`);
+        // El cliente no respondió SÍ/NO — puede que esté pidiendo otra fecha
+        // (ej. "Prefiero viernes 3 de julio"). Si detectamos una fecha nueva,
+        // le mostramos disponibilidad para esa fecha en vez de solo insistir.
+        const fechaPedida = parsearFechaPedida(text);
+        if (fechaPedida) {
+          const fechaLabel = formatDateMX(fechaPedida);
+          const yaAtendido = await confirmarHorarioPuntual(from, text, fechaPedida, fechaLabel, state);
+          if (!yaAtendido) {
+            await mostrarDisponibilidadEnFecha(from, fechaPedida, `¡Claro! Cambiemos tu cita.`);
+          }
+          return;
+        }
+        await chakraSendSession(from, `Responde *SÍ* para confirmar tu cita o *NO* para cancelar.\n\nSi prefieres otra fecha, dime cuál (ej. _viernes 3 de julio_) y te muestro los horarios disponibles.`);
       }
       return;
     }
