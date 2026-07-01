@@ -1053,7 +1053,18 @@ app.post('/webhook', async (req, res) => {
       'a las', 'a la', 'hrs', 'horas',
     ].some(k => textLower.includes(k));
 
-    if (esOtroHorario) {
+    if (esOtroHorario && state?.step !== 'confirmando') {
+      // Si el mensaje ya trae una fecha explícita (ej. "mejor viernes a las 4pm"),
+      // usarla en vez de asumir la fecha que ya estaba en el estado (o "hoy").
+      const fechaEnMensajeOtroHorario = parsearFechaPedida(text);
+      if (fechaEnMensajeOtroHorario) {
+        const fechaLabelNueva = formatDateMX(fechaEnMensajeOtroHorario);
+        const yaRespondido = await confirmarHorarioPuntual(from, text, fechaEnMensajeOtroHorario, fechaLabelNueva, state);
+        if (yaRespondido) return;
+        await mostrarDisponibilidadEnFecha(from, fechaEnMensajeOtroHorario, '¡Claro!');
+        return;
+      }
+
       let fecha = state?.fecha;
       let fechaLabel = state?.fechaLabel;
       if (!fecha) {
@@ -1209,28 +1220,33 @@ app.post('/webhook', async (req, res) => {
         let barberoAsignado = null;
         let horaAsignada = null;
         
-        // Si el cliente ya tenía una hora seleccionada, buscar barbero disponible a esa hora
+        // Si el cliente ya tenía una hora seleccionada, elegir al azar entre
+        // TODOS los barberos disponibles a esa hora (no siempre el primero).
         if (horaSeleccionada) {
+          const disponiblesHora = [];
           for (const barbero of (barberos || [])) {
             const slotsLibres = await getSlotsLibres(barbero.id, state.fecha, horaActual);
-            if (slotsLibres.includes(horaSeleccionada)) {
-              barberoAsignado = barbero;
-              horaAsignada = horaSeleccionada;
-              break;
-            }
+            if (slotsLibres.includes(horaSeleccionada)) disponiblesHora.push(barbero);
+          }
+          if (disponiblesHora.length) {
+            barberoAsignado = disponiblesHora[Math.floor(Math.random() * disponiblesHora.length)];
+            horaAsignada = horaSeleccionada;
           }
         }
         
         // Si no se encontró barbero a esa hora o no había hora seleccionada,
-        // asignar el primer barbero con el primer slot disponible
+        // elegir al azar entre los barberos con espacio ese día, y de ahí
+        // tomar al azar uno de sus primeros slots libres.
         if (!barberoAsignado) {
+          const barberosConEspacio = [];
           for (const barbero of (barberos || [])) {
             const slotsLibres = await getSlotsLibres(barbero.id, state.fecha, horaActual);
-            if (slotsLibres.length > 0) {
-              barberoAsignado = barbero;
-              horaAsignada = slotsLibres[0];
-              break;
-            }
+            if (slotsLibres.length > 0) barberosConEspacio.push({ barbero, slotsLibres });
+          }
+          if (barberosConEspacio.length) {
+            const elegido = barberosConEspacio[Math.floor(Math.random() * barberosConEspacio.length)];
+            barberoAsignado = elegido.barbero;
+            horaAsignada = elegido.slotsLibres[Math.floor(Math.random() * elegido.slotsLibres.length)];
           }
         }
         
