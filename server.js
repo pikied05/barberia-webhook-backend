@@ -225,6 +225,52 @@ function splitSlots(slots) {
   return [...manana.slice(0, 2), ...tarde.slice(0, 2)];
 }
 
+// ─── Construye el mensaje de lista de precios (reutilizable) ────────────────
+
+async function buildPreciosMsg(includeCTA = true) {
+  const { data: servicios, error } = await supabase
+    .from('services')
+    .select('name, price, duration, category')
+    .eq('active', true)
+    .order('category', { ascending: true });
+
+  let mensajePrecios = `💰 *Lista de Precios - Imperium Caesar's Barber Club* 💈\n\n`;
+
+  if (error || !servicios || servicios.length === 0) {
+    mensajePrecios += 
+      `✂️ *Corte de Cabello*: $350\n` +
+      `🧔 *Arreglo de Barba*: $250\n` +
+      `💈 *Corte + Barba*: $550\n` +
+      `🪒 *Afeitado Clásico*: $300\n` +
+      `✨ *Tratamiento Especial*: $400\n\n` +
+      `📞 Para más información, llámanos al (55) XXXX-XXXX`;
+  } else {
+    const categorias = {};
+    for (const servicio of servicios) {
+      const cat = servicio.category || 'Otros';
+      if (!categorias[cat]) categorias[cat] = [];
+      categorias[cat].push(servicio);
+    }
+
+    for (const [categoria, items] of Object.entries(categorias)) {
+      mensajePrecios += `*${categoria}:*\n`;
+      for (const item of items) {
+        mensajePrecios += `  • ${item.name}: *$${item.price}*\n`;
+      }
+      mensajePrecios += '\n';
+    }
+
+    mensajePrecios += `💳 Aceptamos efectivo y tarjetas.\n`;
+    if (includeCTA) {
+      mensajePrecios +=
+        `📅 Recuerda que puedes agendar tu cita escribiendo *hola*.\n\n` +
+        `¿Te gustaría reservar un espacio?`;
+    }
+  }
+
+  return mensajePrecios;
+}
+
 async function buildDisponibilidadMsg() {
   const { data: barberos } = await supabase
     .from('barbers').select('id, name, schedule').eq('active', true);
@@ -493,6 +539,52 @@ app.get('/reenganche-status', async (req, res) => {
     .select('id, reenganche_sent_at')
     .not('reenganche_sent_at', 'is', null)
     .gte('reenganche_sent_at', since.toISOString());
+
+  if (error) return res.status(500).json({ success: false, error: error.message });
+
+  const sentIds = (data || []).map(c => c.id);
+  res.json({ success: true, sentIds });
+});
+
+// ─── Endpoint: marcar mensaje de "Clientes en riesgo" (Dinero Imperium) enviado ─
+// Mismo patrón que /reenganche-sent, pero con su propia columna para no mezclar
+// el bloqueo de "Clientes en riesgo" con el de "Reenganche" en WhatsApp.tsx.
+
+app.post('/imperium-sent', async (req, res) => {
+  const { clientId } = req.body;
+  if (!clientId) return res.status(400).json({ success: false, error: 'Falta clientId' });
+  try {
+    const { error, data } = await supabase
+      .from('clients')
+      .update({ imperium_sent_at: new Date().toISOString() })
+      .eq('id', clientId)
+      .select();
+    if (error) {
+      console.error('❌ /imperium-sent — no se pudo guardar:', error.message);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+    if (!data?.length) {
+      console.warn(`⚠️ /imperium-sent — no se encontró cliente con id ${clientId}`);
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ /imperium-sent:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ─── Endpoint: estado de bloqueo de "Clientes en riesgo" ────────────────────
+
+app.get('/imperium-status', async (req, res) => {
+  const { blockDays = 30 } = req.query;
+  const since = new Date();
+  since.setDate(since.getDate() - Number(blockDays));
+
+  const { data, error } = await supabase
+    .from('clients')
+    .select('id, imperium_sent_at')
+    .not('imperium_sent_at', 'is', null)
+    .gte('imperium_sent_at', since.toISOString());
 
   if (error) return res.status(500).json({ success: false, error: error.message });
 
@@ -1550,46 +1642,7 @@ app.post('/webhook', async (req, res) => {
     ].some(k => textLower.includes(k));
 
     if (esPreguntaPrecio) {
-      // Obtener servicios activos de la base de datos
-      const { data: servicios, error } = await supabase
-        .from('services')
-        .select('name, price, duration, category')
-        .eq('active', true)
-        .order('category', { ascending: true });
-
-      let mensajePrecios = `💰 *Lista de Precios - Imperium Caesar's Barber Club* 💈\n\n`;
-
-      if (error || !servicios || servicios.length === 0) {
-        mensajePrecios += 
-          `✂️ *Corte de Cabello*: $350\n` +
-          `🧔 *Arreglo de Barba*: $250\n` +
-          `💈 *Corte + Barba*: $550\n` +
-          `🪒 *Afeitado Clásico*: $300\n` +
-          `✨ *Tratamiento Especial*: $400\n\n` +
-          `📞 Para más información, llámanos al (55) XXXX-XXXX`;
-      } else {
-        const categorias = {};
-        for (const servicio of servicios) {
-          const cat = servicio.category || 'Otros';
-          if (!categorias[cat]) categorias[cat] = [];
-          categorias[cat].push(servicio);
-        }
-
-        for (const [categoria, items] of Object.entries(categorias)) {
-          mensajePrecios += `*${categoria}:*\n`;
-          for (const item of items) {
-            const duracion = item.duration ? ` (${item.duration} min)` : '';
-            mensajePrecios += `  • ${item.name}: *$${item.price}*\n`;
-          }
-          mensajePrecios += '\n';
-        }
-
-        mensajePrecios += 
-          `💳 Aceptamos efectivo y tarjetas.\n` +
-          `📅 Recuerda que puedes agendar tu cita escribiendo *hola*.\n\n` +
-          `¿Te gustaría reservar un espacio?`;
-      }
-
+      const mensajePrecios = await buildPreciosMsg();
       await chakraSendSession(from, mensajePrecios);
       return;
     }
@@ -1659,6 +1712,18 @@ app.post('/webhook', async (req, res) => {
         `Te ayudamos a proyectar una mejor imagen a través de una experiencia de cuidado personal diseñada para caballeros, que incluye *asesoría de imagen*, *lavado de cabello*, *bebida de cortesía* y nuestras exclusivas *Manos del Emperador*.\n\n` +
         `¿Te reservo algún espacio para vivir la experiencia IMPERIUM?`
       );
+      return;
+    }
+
+    // ── Quiere precios/servicios Y agendar en el mismo mensaje ────────────────
+    // (ej. "quiero conocer sus servicios y agendar cita") → primero precios,
+    // luego horarios, en vez de saltar directo a horarios.
+    if (esAgendar && esPrecio) {
+      const mensajePrecios = await buildPreciosMsg(false);
+      await chakraSendSession(from, mensajePrecios);
+      await prepararFechaYGuardarState(from);
+      const disponibilidadMsg = await buildDisponibilidadMsg();
+      await chakraSendSession(from, `¿Te reservo un espacio? Aquí tienes los horarios disponibles:\n\n${disponibilidadMsg}`);
       return;
     }
 
