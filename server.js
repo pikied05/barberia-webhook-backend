@@ -1097,7 +1097,7 @@ app.post('/webhook', async (req, res) => {
     // TEST_MODE = true  → solo responde a números en TEST_WHITELIST
     // TEST_MODE = false → responde a todos (producción normal)
     // ══════════════════════════════════════════════════════════════════════════
-    const TEST_MODE = false;
+    const TEST_MODE = true;
     const TEST_WHITELIST = [
       '5212711674600',
       '5215523297565'  // ← agrega aquí tus números de prueba (sin + ni espacios)
