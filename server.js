@@ -1005,7 +1005,7 @@ app.post('/webhook', async (req, res) => {
     // TEST_MODE = true  → solo responde a números en TEST_WHITELIST
     // TEST_MODE = false → responde a todos (producción normal)
     // ══════════════════════════════════════════════════════════════════════════
-    const TEST_MODE = false;
+    const TEST_MODE = true;
     const TEST_WHITELIST = [
       '5212711674600',
       '5215523297565'  // ← agrega aquí tus números de prueba (sin + ni espacios)
@@ -1021,21 +1021,6 @@ app.post('/webhook', async (req, res) => {
     }
 
     const state = conversationState[from];
-
-    // ── Si el bot preguntó "¿hay algo más?" y el cliente responde ───────────
-    if (state?.step === 'esperando_respuesta_final') {
-      delete conversationState[from];
-      const esOtraConsulta = ['hola', 'sí', 'si', 'yes', 'agendar', 'cita', 'horario', 'precio', 'quiero'].some(k => textLower.includes(k));
-      if (esOtraConsulta) {
-        // Si quiere algo más, reiniciar flujo normalmente (caerá al bloque de hola/agendar abajo)
-      } else {
-        // "no", "no nada", "no gracias", "bye", etc. → despedida sin tocar la cita
-        const { client: clientFinal } = await getClienteYCita(from);
-        const nameFinal = clientFinal?.name?.split(' ')[0] || '';
-        await chakraSendSession(from, `¡Que tengas un excelente día${nameFinal ? ' ' + nameFinal : ''}! 😊 Cuando nos necesites aquí estaremos. 💈`);
-        return;
-      }
-    }
 
     if (state && ['cancelar', 'salir', 'cancel', 'exit'].some(k => textLower.includes(k))) {
       delete conversationState[from];
@@ -1630,22 +1615,24 @@ app.post('/webhook', async (req, res) => {
     if (esGracias) {
       const { client } = await getClienteYCita(from);
       const nombreGracias = client?.name?.split(' ')[0] || '';
-      conversationState[from] = { step: 'esperando_respuesta_final' };
-      await chakraSendSession(from, `¡Con gusto ${nombreGracias}! 😊 ¿Hay algo más en lo que te pueda ayudar?`);
-      return;
-    }
-
-    // ── Mensaje largo o pregunta compleja → derivar a humano ─────────────────
-    const esMensajeLargo   = text.length > 80;
-    const esPreguntaComple = (text.match(/\?/g) || []).length > 1 || (text.length > 50 && text.includes('?'));
-    if (esMensajeLargo || esPreguntaComple) {
-      await chakraSendSession(from, `Hola 👋 Recibimos tu mensaje. Un momento, pronto te atendemos personalmente. 💈`);
+      await chakraSendSession(from, `¡Con gusto${nombreGracias ? ' ' + nombreGracias : ''}! 😊 Que tengas excelente día. 💈`);
       return;
     }
 
     const esHola    = ['hola', 'hello', 'hi', 'buenas', 'buenos', 'buen dia', 'buen día', 'hey'].some(k => textLower.includes(k));
     const esAgendar = ['agendar', 'cita', 'appointment', 'reservar', 'turno', 'espacio', 'disponibilidad'].some(k => textLower.includes(k));
     const quiereCita = ['sí', 'si', 'yes', 'claro', 'por favor', 'quiero', 'reserva', 'reservar', 'aparta', 'apartar', 'anota', 'anotar'].some(k => textLower.includes(k));
+    const esPrecio  = ['precio', 'precios', 'cuanto cuesta', 'cuánto cuesta', 'costo', 'servicio', 'servicios'].some(k => textLower.includes(k));
+
+    // ── Mensaje largo o pregunta compleja → derivar a humano ─────────────────
+    // (excepto si ya trae una intención reconocible: saludo, agendar o precios/servicios)
+    const esMensajeLargo   = text.length > 80;
+    const esPreguntaComple = (text.match(/\?/g) || []).length > 1 || (text.length > 50 && text.includes('?'));
+    const tieneIntencionConocida = esHola || esAgendar || quiereCita || esPrecio;
+    if ((esMensajeLargo || esPreguntaComple) && !tieneIntencionConocida) {
+      await chakraSendSession(from, `Hola 👋 Recibimos tu mensaje. Un momento, pronto te atendemos personalmente. 💈`);
+      return;
+    }
 
     // ── Si está esperando confirmación de si quiere cita ─────────────────────
     if (state?.step === 'esperando_confirmacion_cita') {
