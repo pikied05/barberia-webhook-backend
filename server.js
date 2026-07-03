@@ -1114,6 +1114,20 @@ app.post('/webhook', async (req, res) => {
 
     const state = conversationState[from];
 
+    // ── Pregunta por ubicación (funciona en cualquier momento, sin importar el step) ──
+    const esUbicacion = [
+      'ubicados', 'ubicacion', 'ubicación', 'donde estan', 'dónde están',
+      'donde están', 'dónde estan', 'donde queda', 'dónde queda',
+      'direccion', 'dirección', 'como llegar', 'cómo llegar', 'donde se encuentran',
+      'dónde se encuentran', 'localizacion', 'localización', 'mapa', 'maps'
+    ].some(k => textLower.includes(k));
+    if (esUbicacion) {
+      await chakraSendSession(from,
+        `📍 Aquí puedes ver nuestra ubicación:\nhttps://share.google/sHxVo7y2HxhZkQ1oG\n\n¡Te esperamos! 💈`
+      );
+      return;
+    }
+
     if (state && ['cancelar', 'salir', 'cancel', 'exit'].some(k => textLower.includes(k))) {
       delete conversationState[from];
       const { client } = await getClienteYCita(from);
@@ -1456,6 +1470,51 @@ app.post('/webhook', async (req, res) => {
           `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
         );
         return;
+      }
+
+      // ── Solo mandó el nombre del barbero (sin hora) → usar la hora ya seleccionada ──
+      if (!matchNombreHora && !soloHoraMatch && state.horaSeleccionada) {
+        const nombreBuscado = normalizarTexto(text);
+        const { data: barberosSolo } = await supabase.from('barbers').select('id, name').eq('active', true);
+        const barberoSolo = barberosSolo?.find(b => {
+          const nombreBarbero = normalizarTexto(b.name);
+          return nombreBarbero.includes(nombreBuscado) || nombreBuscado.includes(nombreBarbero);
+        });
+
+        if (barberoSolo) {
+          const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
+          const esHoy = state.fecha === nowMX.toISOString().slice(0, 10);
+          const horaActual = esHoy ? nowMX.getHours() * 60 + nowMX.getMinutes() : null;
+
+          const slotsLibres = await getSlotsLibres(barberoSolo.id, state.fecha, horaActual);
+          if (!slotsLibres.includes(state.horaSeleccionada)) {
+            await chakraSendSession(from, `😔 Ese horario ya no está disponible con *${barberoSolo.name}*.\n¿Quieres intentar otra hora u otro barbero? Dime cuál, o escribe *cancelar*.`);
+            return;
+          }
+
+          const servicioSolicitado = extraerServicioDelMensaje(text) || state.serviceName || 'Corte Premium';
+          const digits10 = from.replace(/^52/, '').slice(-10);
+
+          conversationState[from] = {
+            step: 'confirmando',
+            barberoId: barberoSolo.id, barberoName: barberoSolo.name,
+            fecha: state.fecha, fechaLabel: state.fechaLabel,
+            hora: state.horaSeleccionada,
+            horaSeleccionada: state.horaSeleccionada,
+            clientPhone: state.clientPhone || digits10,
+            serviceName: servicioSolicitado,
+          };
+
+          await chakraSendSession(from,
+            `📋 *Resumen de tu cita:*\n\n` +
+            `👤 Barbero: *${barberoSolo.name}*\n` +
+            `📅 Fecha: *${state.fechaLabel}*\n` +
+            `🕐 Hora: *${state.horaSeleccionada}*\n` +
+            `💇 Servicio: *${servicioSolicitado}*\n\n` +
+            `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
+          );
+          return;
+        }
       }
 
       if (soloHoraMatch) {
