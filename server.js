@@ -88,6 +88,29 @@ async function chakraSendSession(to, message) {
   }, { headers: chakraHeaders(), timeout: 15000 });
 }
 
+// Coordenadas de Imperium Caesar's Barber Club
+const BARBERSHOP_LOCATION = {
+  latitude: 18.984230560513783,
+  longitude: -98.29344295798947,
+  name: "Imperium Caesar's Barber Club",
+  address: 'Blvd. de las Cascadas 299-Loc 12, Lomas de Angelópolis, 72865 Puebla, Pue.',
+};
+
+async function chakraSendLocation(to) {
+  const url = `${CHAKRA_API_URL}/v1/ext/plugin/whatsapp/${CHAKRA_PLUGIN_ID}/api/${WA_API_VERSION}/${CHAKRA_PHONE_ID}/messages`;
+  await axios.post(url, {
+    messaging_product: 'whatsapp',
+    to: normalizePhone(to),
+    type: 'location',
+    location: {
+      latitude: BARBERSHOP_LOCATION.latitude,
+      longitude: BARBERSHOP_LOCATION.longitude,
+      name: BARBERSHOP_LOCATION.name,
+      address: BARBERSHOP_LOCATION.address,
+    },
+  }, { headers: chakraHeaders(), timeout: 15000 });
+}
+
 function esErrorDeIdioma(error) {
   const dataStr = JSON.stringify(error.response?.data ?? '');
   return dataStr.includes('132001') || error.response?.data?.error?.code === 132001;
@@ -1150,9 +1173,8 @@ app.post('/webhook', async (req, res) => {
       'dónde se encuentran', 'localizacion', 'localización', 'mapa', 'maps'
     ].some(k => textLower.includes(k));
     if (esUbicacion) {
-      await chakraSendSession(from,
-        `📍 Aquí puedes ver nuestra ubicación:\nhttps://share.google/sHxVo7y2HxhZkQ1oG\n\n¡Te esperamos! 💈`
-      );
+      await chakraSendLocation(from);
+      await chakraSendSession(from, `¡Te esperamos! 💈`);
       return;
     }
 
