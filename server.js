@@ -772,7 +772,7 @@ function extraerHoraDeTexto(text) {
   if (hour > 23 || minutes > 59) return null;
   if (meridiano === 'pm' && hour < 12) hour += 12;
   if (meridiano === 'am' && hour === 12) hour = 0;
-  if (!meridiano && hour < 10 && hour > 6) hour += 12; // sin sufijo y hora baja -> asumimos PM
+  if (!meridiano && hour >= 1 && hour <= 9) hour += 12; // sin sufijo y hora baja -> asumimos PM
 
   return `${String(hour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
 }
@@ -1180,7 +1180,7 @@ app.post('/webhook', async (req, res) => {
         const meridiano = laHoraMatch[3]?.toLowerCase().replace(/\./g, '') || '';
         if (meridiano === 'pm' && hour < 12) hour += 12;
         if (meridiano === 'am' && hour === 12) hour = 0;
-        if (!meridiano && hour < 10 && hour > 6) hour += 12;
+        if (!meridiano && hour >= 1 && hour <= 9) hour += 12;
         const horaSolicitada = `${String(hour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
 
         if (ALL_SLOTS.includes(horaSolicitada)) {
@@ -1288,7 +1288,7 @@ app.post('/webhook', async (req, res) => {
       
       if (meridiano === 'pm' && hour < 12) hour += 12;
       if (meridiano === 'am' && hour === 12) hour = 0;
-      if (!meridiano && hour < 10 && hour > 6) hour += 12;
+      if (!meridiano && hour >= 1 && hour <= 9) hour += 12;
       
       const horaSolicitada = `${String(hour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
       
@@ -1481,7 +1481,7 @@ app.post('/webhook', async (req, res) => {
         
         if (meridiano === 'pm' && hour < 12) hour += 12;
         if (meridiano === 'am' && hour === 12) hour = 0;
-        if (!meridiano && hour < 10 && hour > 6) hour += 12;
+        if (!meridiano && hour >= 1 && hour <= 9) hour += 12;
         
         const horaSolicitada = `${String(hour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
         
@@ -1599,7 +1599,7 @@ app.post('/webhook', async (req, res) => {
         
         if (meridiano === 'pm' && hour < 12) hour += 12;
         if (meridiano === 'am' && hour === 12) hour = 0;
-        if (!meridiano && hour < 10 && hour > 6) hour += 12;
+        if (!meridiano && hour >= 1 && hour <= 9) hour += 12;
         
         const horaSolicitada = `${String(hour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
 
@@ -1894,6 +1894,14 @@ app.post('/webhook', async (req, res) => {
     if (esAgendar && esPrecio) {
       const mensajePrecios = await buildPreciosMsg(false);
       await chakraSendSession(from, mensajePrecios);
+
+      // Si ya mencionó una hora puntual (ej. "quiero precios y agendar a las 15:00"),
+      // revisar esa hora en vez de solo mostrar la disponibilidad genérica.
+      const fechaMencionadaPrecio = parsearFechaPedida(text);
+      const fechaParaHoraPrecio = fechaMencionadaPrecio || new Date(Date.now() - 6 * 60 * 60 * 1000);
+      const yaAtendidoPrecio = await confirmarHorarioPuntual(from, text, fechaParaHoraPrecio, formatDateMX(fechaParaHoraPrecio), null);
+      if (yaAtendidoPrecio) return;
+
       await prepararFechaYGuardarState(from);
       const disponibilidadMsg = await buildDisponibilidadMsg();
       await chakraSendSession(from, `¿Te reservo un espacio? Aquí tienes los horarios disponibles:\n\n${disponibilidadMsg}`);
@@ -1902,6 +1910,16 @@ app.post('/webhook', async (req, res) => {
 
     // ── Quiere agendar directamente ───────────────────────────────────────────
     if (esAgendar) {
+      // Si el mensaje ya trae una hora puntual (ej. "¿Tendrán espacio a las 15:00?"),
+      // revisar esa hora exacta (en la fecha mencionada, o "hoy" si no mencionó fecha)
+      // en vez de saltar directo a mostrar la disponibilidad genérica del primer día
+      // con espacio — eso era lo que causaba que se ofreciera "mañana" aunque hoy sí
+      // hubiera hueco a esa hora.
+      const fechaMencionada = parsearFechaPedida(text);
+      const fechaParaHora = fechaMencionada || new Date(Date.now() - 6 * 60 * 60 * 1000);
+      const yaAtendido = await confirmarHorarioPuntual(from, text, fechaParaHora, formatDateMX(fechaParaHora), null);
+      if (yaAtendido) return;
+
       await prepararFechaYGuardarState(from);
       const disponibilidadMsg = await buildDisponibilidadMsg();
       await chakraSendSession(from, `¡Hola! 👋 Bienvenido a *Imperium Caesar's Barber Club* 💈\n\n${disponibilidadMsg}`);
