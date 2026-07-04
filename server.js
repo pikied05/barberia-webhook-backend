@@ -979,14 +979,25 @@ async function obtenerOCrearServicio(nombreBuscado = null) {
 
 async function obtenerOCrearCliente(phone, name = null) {
   const digits10 = phone.replace(/^52/, '').slice(-10);
-  
-  // Buscar cliente existente
-  const { data: existingClient } = await supabase
+
+  // Buscar cliente existente. Usamos .limit(1) en vez de .maybeSingle() porque
+  // .maybeSingle() truena si el ilike hace match con MÁS de un registro (ej. el
+  // mismo teléfono guardado dos veces con formato distinto) — eso hacía que el
+  // error se ignorara silenciosamente (solo se destructuraba `data`) y el código
+  // pensara que el cliente no existía, intentando crear uno nuevo con el mismo
+  // teléfono y tronando por duplicado en el insert.
+  const { data: existingClients, error: findError } = await supabase
     .from('clients')
     .select('id, name, phone')
-    .or(`phone.ilike.%${digits10}%`)
-    .maybeSingle();
+    .ilike('phone', `%${digits10}%`)
+    .order('created_at', { ascending: false })
+    .limit(1);
 
+  if (findError) {
+    console.error('⚠️ Error buscando cliente existente:', findError.message);
+  }
+
+  const existingClient = existingClients?.[0] || null;
   if (existingClient) {
     return existingClient;
   }
@@ -998,6 +1009,7 @@ async function obtenerOCrearCliente(phone, name = null) {
     .insert([{
       name: nombreCliente,
       phone: digits10,
+      loyalty_level: 'nuevo',
       created_at: new Date().toISOString(),
     }])
     .select()
@@ -1005,6 +1017,22 @@ async function obtenerOCrearCliente(phone, name = null) {
 
   if (error) {
     console.error('❌ Error creando cliente:', error.message);
+
+    // Si el error es por teléfono duplicado (el cliente en realidad ya existía
+    // pero no lo detectamos arriba por algún formato distinto), intentamos
+    // recuperarlo en vez de fallar el agendado completo.
+    const { data: recuperado } = await supabase
+      .from('clients')
+      .select('id, name, phone')
+      .ilike('phone', `%${digits10}%`)
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    if (recuperado?.[0]) {
+      console.log(`♻️ Cliente recuperado tras error de duplicado: ${recuperado[0].name} (${recuperado[0].phone})`);
+      return recuperado[0];
+    }
+
     return null;
   }
 
@@ -1467,9 +1495,34 @@ app.post('/webhook', async (req, res) => {
             meridiano: nombreHora[4] || ''
           };
         } else {
-          const solo = text.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.?m\.?|p\.?m\.?|hrs?)?/i);
-          if (solo) {
-            soloHoraMatch = solo;
+          // ── Hora seguida del nombre SIN conector (ej. "14:00 Raúl") ──────────
+          // Antes esto caía directo a "solo hora" e ignoraba el nombre por completo,
+          // asignando un barbero al azar en vez del que el cliente pidió.
+          // Validamos contra la lista real de barberos para no confundir palabras
+          // sueltas ("14:00 porfa", "18:30 gracias") con un nombre.
+          const horaNombreSinConector = text.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.?m\.?|p\.?m\.?)?\s+([a-záéíóúñA-ZÁÉÍÓÚÑ]+(?:\s+[a-záéíóúñA-ZÁÉÍÓÚÑ]+)?)\s*$/i);
+          if (horaNombreSinConector) {
+            const posibleNombre = normalizarTexto(horaNombreSinConector[4]);
+            const { data: barberosCheck } = await supabase.from('barbers').select('name').eq('active', true);
+            const coincide = (barberosCheck || []).some(b => {
+              const nb = normalizarTexto(b.name);
+              return nb.includes(posibleNombre) || posibleNombre.includes(nb);
+            });
+            if (coincide) {
+              matchNombreHora = {
+                hora: horaNombreSinConector[1],
+                minutos: horaNombreSinConector[2] || '00',
+                meridiano: horaNombreSinConector[3] || '',
+                nombre: horaNombreSinConector[4].trim()
+              };
+            }
+          }
+
+          if (!matchNombreHora) {
+            const solo = text.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.?m\.?|p\.?m\.?|hrs?)?/i);
+            if (solo) {
+              soloHoraMatch = solo;
+            }
           }
         }
       }
