@@ -29,6 +29,14 @@ const CHAKRA_PHONE_ID  = process.env.CHAKRA_PHONE_NUMBER_ID;
 const WA_API_VERSION   = process.env.WA_API_VERSION || 'v20.0';
 const VERIFY_TOKEN     = process.env.WEBHOOK_VERIFY_TOKEN || 'imperium_verify_2024';
 
+// Número(s) de WhatsApp del staff de la barbería a los que se les avisa cuando
+// la automatización no pudo completar un agendado/reagendado por sí sola, para
+// que lo registren manualmente. Puede ser una lista separada por comas.
+const BARBERSHOP_ALERT_PHONES = (process.env.BARBERSHOP_ALERT_PHONES || '')
+  .split(',')
+  .map(p => p.trim())
+  .filter(Boolean);
+
 const chakraHeaders = () => ({
   Authorization: `Bearer ${CHAKRA_API_KEY}`,
   'Content-Type': 'application/json',
@@ -86,6 +94,25 @@ async function chakraSendSession(to, message) {
     type: 'text',
     text: { body: message },
   }, { headers: chakraHeaders(), timeout: 15000 });
+}
+
+// Avisa al WhatsApp de la barbería cuando la automatización no pudo completar
+// un agendado/reagendado por sí sola (error de base de datos, etc.), para que
+// el equipo lo registre manualmente. Nunca debe tronar el flujo del cliente:
+// si el envío de la alerta falla, solo se loguea.
+async function alertarEquipoManual(mensaje) {
+  console.error(`🚨 ALERTA MANUAL: ${mensaje}`);
+  if (!BARBERSHOP_ALERT_PHONES.length) {
+    console.warn('⚠️ BARBERSHOP_ALERT_PHONES no configurado — no se pudo notificar al staff.');
+    return;
+  }
+  for (const numero of BARBERSHOP_ALERT_PHONES) {
+    try {
+      await chakraSendSession(numero, `🚨 *Atención requerida*\n\n${mensaje}`);
+    } catch (err) {
+      console.error(`❌ No se pudo enviar alerta manual a ${numero}:`, err.response?.data ?? err.message);
+    }
+  }
 }
 
 // Coordenadas de Imperium Caesar's Barber Club
@@ -157,14 +184,36 @@ const ALL_SLOTS = [
   '18:00','18:30','19:00','19:30',
 ];
 
-// Hora real de cierre (30 min después del último slot listado). Se usa para
-// validar que una cita de 60 min no se pase de la hora de cierre, SIN exigir
-// que el slot de cierre (20:00) esté también en ALL_SLOTS como horario
-// reservable — antes esa confusión hacía que 19:30 nunca apareciera disponible.
-const CIERRE_MINUTOS = (() => {
-  const [h, m] = ALL_SLOTS[ALL_SLOTS.length - 1].split(':').map(Number);
+// Sábado y domingo el negocio cierra a las 5:00 pm. Dejamos como último slot
+// reservable las 16:00, para que una cita de 60 min termine justo a las 17:00
+// y no se pase de la hora de cierre de fin de semana.
+const WEEKEND_SLOTS = [
+  '10:00','10:30','11:00','11:30','12:00','12:30',
+  '13:00','13:30','14:00','14:30','15:00','15:30','16:00',
+];
+
+function esFinDeSemana(fechaODateStr) {
+  const d = fechaODateStr instanceof Date ? fechaODateStr : new Date(`${fechaODateStr}T12:00:00`);
+  const dia = d.getDay();
+  return dia === 0 || dia === 6; // Domingo o Sábado
+}
+
+function getSlotsDelDia(fechaODateStr) {
+  return esFinDeSemana(fechaODateStr) ? WEEKEND_SLOTS : ALL_SLOTS;
+}
+
+function getCierreDelDia(fechaODateStr) {
+  const slots = getSlotsDelDia(fechaODateStr);
+  const [h, m] = slots[slots.length - 1].split(':').map(Number);
   return h * 60 + m + 30;
-})();
+}
+
+// Rango de horario a mostrar en mensajes de error, según el día (para no decir
+// "10:00 – 19:30" en sábado/domingo cuando el negocio cierra a las 17:00).
+function getHorarioLabel(fechaODateStr) {
+  const slots = getSlotsDelDia(fechaODateStr);
+  return `${slots[0]} – ${slots[slots.length - 1]}`;
+}
 
 const DAY_MAP = { 0: 'Dom', 1: 'Lun', 2: 'Mar', 3: 'Mié', 4: 'Jue', 5: 'Vie', 6: 'Sáb' };
 
@@ -221,7 +270,10 @@ async function getSlotsLibres(barberId, dateStr, filtroHoraActual = null) {
     }
   }
 
-  return ALL_SLOTS.filter(slot => {
+  const slotsDelDia   = getSlotsDelDia(dateStr);
+  const cierreMinutos = getCierreDelDia(dateStr);
+
+  return slotsDelDia.filter(slot => {
     if (filtroHoraActual !== null) {
       const [h, m] = slot.split(':').map(Number);
       const slotMinutos = h * 60 + m;
@@ -232,7 +284,7 @@ async function getSlotsLibres(barberId, dateStr, filtroHoraActual = null) {
     const startTotal = h * 60 + m;
     for (let i = 0; i < 60; i += 30) {
       const needed = startTotal + i;
-      if (needed > CIERRE_MINUTOS) return false; // se pasaría de la hora de cierre
+      if (needed > cierreMinutos) return false; // se pasaría de la hora de cierre
       const nh = String(Math.floor(needed / 60)).padStart(2, '0');
       const nm = String(needed % 60).padStart(2, '0');
       const neededSlot = `${nh}:${nm}`;
@@ -408,7 +460,7 @@ async function getClienteYCita(from) {
     const today = new Date().toISOString().slice(0, 10);
     const { data: citaRows } = await supabase
       .from('appointments')
-      .select('id, date, time, status, barber_name')
+      .select('id, date, time, status, barber_name, barber_id, service_name, service_id')
       .eq('client_id', client.id)
       .gte('date', today)
       .in('status', ['pendiente', 'confirmada'])
@@ -809,8 +861,8 @@ async function confirmarHorarioPuntual(from, text, fechaDate, fechaLabel, state)
   const horaSolicitada = extraerHoraDeTexto(text);
   if (!horaSolicitada) return false;
 
-  if (!ALL_SLOTS.includes(horaSolicitada)) {
-    await chakraSendSession(from, `😅 La hora *${horaSolicitada}* no está en nuestro horario (10:00 – 19:30).\nDime otra hora o escribe *cancelar*.`);
+  if (!getSlotsDelDia(fechaDate).includes(horaSolicitada)) {
+    await chakraSendSession(from, `😅 La hora *${horaSolicitada}* no está en nuestro horario (${getHorarioLabel(fechaDate)}).\nDime otra hora o escribe *cancelar*.`);
     return true;
   }
 
@@ -851,35 +903,22 @@ async function confirmarHorarioPuntual(from, text, fechaDate, fechaLabel, state)
   const servicioSolicitado = extraerServicioDelMensaje(text) || state?.serviceName || 'Corte Premium';
   const digits10 = from.replace(/^52/, '').slice(-10);
 
-  if (disponibles.length === 1) {
-    const barbero = disponibles[0];
-    conversationState[from] = {
-      step: 'confirmando',
-      barberoId: barbero.id, barberoName: barbero.name,
-      fecha: dateStr, fechaLabel,
-      hora: horaSolicitada, horaSeleccionada: horaSolicitada,
-      clientPhone: state?.clientPhone || digits10,
-      serviceName: servicioSolicitado,
-    };
-    await chakraSendSession(from,
-      `✅ *${barbero.name}* está libre a las *${horaSolicitada}* el *${fechaLabel}*.\n\n` +
-      `📋 *Resumen de tu cita:*\n👤 Barbero: *${barbero.name}*\n📅 Fecha: *${fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n💇 Servicio: *${servicioSolicitado}*\n\n` +
-      `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
-    );
-    return true;
-  }
+  const nombreBuscado = normalizarTexto(text);
+  let barbero = disponibles.find(b => nombreBuscado.includes(normalizarTexto(b.name)));
+  if (!barbero) barbero = disponibles[Math.floor(Math.random() * disponibles.length)];
 
   conversationState[from] = {
-    step: 'esperando_seleccion',
+    step: 'confirmando',
+    barberoId: barbero.id, barberoName: barbero.name,
     fecha: dateStr, fechaLabel,
-    serviceName: servicioSolicitado,
+    hora: horaSolicitada, horaSeleccionada: horaSolicitada,
     clientPhone: state?.clientPhone || digits10,
-    horaSeleccionada: horaSolicitada,
+    serviceName: servicioSolicitado,
   };
-  const nombres = disponibles.map(b => `*${b.name}*`).join(', ');
   await chakraSendSession(from,
-    `✅ A las *${horaSolicitada}* el *${fechaLabel}* tienes disponible a: ${nombres}.\n` +
-    `Responde con el *nombre del barbero* o escribe *cualquiera*.\nEj: _${disponibles[0].name}_ o _cualquiera_`
+    `✅ *${barbero.name}* está libre a las *${horaSolicitada}* el *${fechaLabel}*.\n\n` +
+    `📋 *Resumen de tu cita:*\n👤 Barbero: *${barbero.name}*\n📅 Fecha: *${fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n💇 Servicio: *${servicioSolicitado}*\n\n` +
+    `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
   );
   return true;
 }
@@ -1027,7 +1066,7 @@ async function obtenerOCrearCliente(phone, name = null) {
 
   // Crear nuevo cliente
   const nombreCliente = name || 'Cliente WhatsApp';
-  const { data: newClient, error } = await supabase
+  let { data: newClient, error } = await supabase
     .from('clients')
     .insert([{
       name: nombreCliente,
@@ -1037,6 +1076,25 @@ async function obtenerOCrearCliente(phone, name = null) {
     }])
     .select()
     .single();
+
+  // Si el error es por el check constraint de loyalty_level (el valor 'nuevo'
+  // no está entre los permitidos por la tabla), reintentamos sin mandar ese
+  // campo y dejamos que la base de datos aplique su propio default, en vez de
+  // tronar todo el agendado por un valor que no coincide con el constraint.
+  if (error && /loyalty_level/i.test(error.message || '')) {
+    console.warn('⚠️ loyalty_level rechazado por constraint, reintentando sin ese campo:', error.message);
+    const retry = await supabase
+      .from('clients')
+      .insert([{
+        name: nombreCliente,
+        phone: digits10,
+        created_at: new Date().toISOString(),
+      }])
+      .select()
+      .single();
+    newClient = retry.data;
+    error = retry.error;
+  }
 
   if (error) {
     console.error('❌ Error creando cliente:', error.message);
@@ -1185,6 +1243,196 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
+    // ── Reagendar cita existente (cambiar fecha/hora sin cancelar) ───────────
+    // Permite que el cliente mueva su cita a otro día/hora en un solo flujo,
+    // sin tener que escribir "cancelar" y volver a empezar desde cero.
+    const esReagendar = [
+      'reagendar', 're agendar', 'reprogramar',
+      'cambiar mi cita', 'cambiar la cita', 'cambiar de cita',
+      'cambiar de fecha', 'cambiar de dia', 'cambiar de día',
+      'mover mi cita', 'mover la cita', 'cambiar horario de mi cita',
+      'otro dia para mi cita', 'otro día para mi cita', 'otra fecha para mi cita',
+      'cambiar mi hora', 'moverla', 'cambiarla de dia', 'cambiarla de día',
+    ].some(k => textLower.includes(k));
+
+    const enFlujoReagendar = ['reagendar_fecha', 'reagendar_seleccion', 'reagendar_confirmando'].includes(state?.step);
+
+    if (esReagendar && !enFlujoReagendar) {
+      const { client: clienteReagendar, cita: citaReagendar } = await getClienteYCita(from);
+      const nombreReagendar = clienteReagendar?.name?.split(' ')[0] || 'amigo';
+
+      if (!clienteReagendar || !citaReagendar) {
+        await chakraSendSession(from, `Hola ${nombreReagendar} 👋 No encontré ninguna cita próxima a tu nombre.\n\nEscribe *hola* para ver horarios y agendar una cita nueva. 💈`);
+        return;
+      }
+
+      conversationState[from] = {
+        step: 'reagendar_fecha',
+        citaId: citaReagendar.id,
+        citaFechaOriginal: citaReagendar.date,
+        citaHoraOriginal: citaReagendar.time,
+        barberoId: citaReagendar.barber_id || null,
+        barberoName: citaReagendar.barber_name || null,
+        serviceId: citaReagendar.service_id || null,
+        serviceName: citaReagendar.service_name || 'Corte Premium',
+        clientPhone: clienteReagendar.phone,
+      };
+
+      await chakraSendSession(from,
+        `¡Claro ${nombreReagendar}! Vamos a cambiar tu cita del *${formatFechaCorta(citaReagendar.date)}* a las *${citaReagendar.time}*, sin cancelarla. 🙌\n\n¿Para qué día la quieres? (ej. _viernes_, _mañana_, _10 de julio_)`
+      );
+      return;
+    }
+
+    // ── Reagendar: esperando la nueva fecha ──────────────────────────────────
+    if (state?.step === 'reagendar_fecha') {
+      const fechaPedida = parsearFechaPedida(text);
+      if (!fechaPedida) {
+        await chakraSendSession(from, `No entendí la fecha 😅\nDime algo como *viernes*, *mañana* o *10 de julio*, o escribe *cancelar* para salir (tu cita original no se toca).`);
+        return;
+      }
+
+      const fechaStr   = toYMD(fechaPedida);
+      const fechaLabel = formatDateMX(fechaPedida);
+      const dayName    = DAY_MAP[fechaPedida.getDay()];
+      const nowMX      = new Date(Date.now() - 6 * 60 * 60 * 1000);
+      const esHoy      = fechaStr === nowMX.toISOString().slice(0, 10);
+      const horaActual = esHoy ? nowMX.getHours() * 60 + nowMX.getMinutes() : null;
+
+      const { data: barberosDisp } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
+      const barberosDelDia = (barberosDisp || []).filter(b => {
+        const schedule = Array.isArray(b.schedule) ? b.schedule : [];
+        return schedule.some(d => normalizarTexto(d) === normalizarTexto(dayName));
+      });
+
+      let msgSlots = '';
+      let haySlots = false;
+      for (const b of barberosDelDia) {
+        const slots = await getSlotsLibres(b.id, fechaStr, horaActual);
+        const seleccionados = splitSlots(slots);
+        if (!seleccionados.length) continue;
+        haySlots = true;
+        msgSlots += `👤 *${b.name}:* ${seleccionados.join(' · ')}\n`;
+      }
+
+      if (!haySlots) {
+        await chakraSendSession(from,
+          `😔 El *${fechaLabel}* no tenemos disponibilidad.\n¿Quieres intentar otro día? Dime cuál, o escribe *cancelar* (tu cita original se mantiene).`
+        );
+        return;
+      }
+
+      conversationState[from] = { ...state, step: 'reagendar_seleccion', fecha: fechaStr, fechaLabel };
+      await chakraSendSession(from,
+        `✂️ *Horarios disponibles — ${fechaLabel}:*\n\n${msgSlots}\n` +
+        `➡️ Responde con el *nombre del barbero* y la *hora* (ej. _Giovanni 15:00_), o solo la *hora* y te asignamos a alguien libre.`
+      );
+      return;
+    }
+
+    // ── Reagendar: esperando barbero + hora ──────────────────────────────────
+    if (state?.step === 'reagendar_seleccion') {
+      const horaSolicitada = extraerHoraDeTexto(text);
+      if (!horaSolicitada || !getSlotsDelDia(state.fecha).includes(horaSolicitada)) {
+        await chakraSendSession(from, `No entendí la hora 😅\nDime algo como *17:00*, *5 pm* o *18 hrs* (horario: ${getHorarioLabel(state.fecha)}), o escribe *cancelar*.`);
+        return;
+      }
+
+      const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
+      const esHoy = state.fecha === nowMX.toISOString().slice(0, 10);
+      const horaActual = esHoy ? nowMX.getHours() * 60 + nowMX.getMinutes() : null;
+
+      const { data: barberos } = await supabase.from('barbers').select('id, name').eq('active', true);
+      const disponibles = [];
+      for (const b of (barberos || [])) {
+        const slotsLibres = await getSlotsLibres(b.id, state.fecha, horaActual);
+        if (slotsLibres.includes(horaSolicitada)) disponibles.push(b);
+      }
+
+      if (!disponibles.length) {
+        await chakraSendSession(from, `😔 A las *${horaSolicitada}* no tengo a nadie libre el *${state.fechaLabel}*.\n¿Quieres intentar otra hora? Dime cuál, o escribe *cancelar*.`);
+        return;
+      }
+
+      const nombreBuscado = normalizarTexto(text);
+      let barberoElegido = disponibles.find(b => nombreBuscado.includes(normalizarTexto(b.name)));
+      if (!barberoElegido) {
+        barberoElegido = disponibles[Math.floor(Math.random() * disponibles.length)];
+      }
+
+      conversationState[from] = {
+        ...state,
+        step: 'reagendar_confirmando',
+        hora: horaSolicitada,
+        barberoId: barberoElegido.id,
+        barberoName: barberoElegido.name,
+      };
+      await chakraSendSession(from,
+        `📋 *Nuevo horario de tu cita:*\n👤 Barbero: *${barberoElegido.name}*\n📅 Fecha: *${state.fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n💇 Servicio: *${state.serviceName}*\n\n` +
+        `¿Confirmas el cambio?\n✅ Responde *SÍ* para actualizar tu cita\n❌ Responde *NO* para dejarla como estaba`
+      );
+      return;
+    }
+
+    // ── Reagendar: confirmación final (actualiza la cita, no crea una nueva) ─
+    if (state?.step === 'reagendar_confirmando') {
+      const confirma = ['sí', 'si', 'yes', 'confirmo', 'ok', '1', '✅'].some(k => textLower.includes(k));
+      const noConfirma = ['no', 'cancelar', 'cancel', '2'].some(k => textLower.includes(k));
+
+      if (confirma) {
+        const endTime = (() => {
+          const [h, m] = state.hora.split(':').map(Number);
+          const end = h * 60 + m + 60;
+          return `${String(Math.floor(end / 60)).padStart(2, '0')}:${String(end % 60).padStart(2, '0')}`;
+        })();
+
+        const { error } = await supabase
+          .from('appointments')
+          .update({
+            date: state.fecha,
+            time: state.hora,
+            end_time: endTime,
+            barber_id: state.barberoId,
+            barber_name: state.barberoName,
+            status: 'pendiente',
+            reminder_sent: false,
+            notes: `Reagendado por WhatsApp desde ${state.citaFechaOriginal} ${state.citaHoraOriginal}.`,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', state.citaId);
+
+        delete conversationState[from];
+
+        if (error) {
+          console.error('❌ Error reagendando cita:', error.message);
+          await chakraSendSession(from, `¡Gracias! 🙌 Ya casi tenemos listo tu cambio de cita — en un momento el equipo te lo confirma personalmente.`);
+          await alertarEquipoManual(
+            `No se pudo *reagendar automáticamente* la cita ${state.citaId}.\n` +
+            `Cliente: ${state.clientPhone || from}\n` +
+            `Cita original: ${state.citaFechaOriginal} ${state.citaHoraOriginal}\n` +
+            `Nueva fecha/hora solicitada: ${state.fecha} ${state.hora} con ${state.barberoName}\n` +
+            `Error: ${error.message}\n\nRegístralo manualmente en el sistema.`
+          );
+          return;
+        }
+
+        console.log(`🔁 Cita ${state.citaId} reagendada a ${state.fecha} ${state.hora} con ${state.barberoName}`);
+        await chakraSendSession(from,
+          `✅ ¡Listo! Tu cita fue actualizada:\n\n` +
+          `👤 Barbero: *${state.barberoName}*\n` +
+          `📅 Nueva fecha: *${state.fechaLabel}*\n` +
+          `🕐 Nueva hora: *${state.hora}*\n\n` +
+          `Te esperamos en Imperium Caesar's Barber Club 💈`
+        );
+      } else if (noConfirma) {
+        delete conversationState[from];
+        await chakraSendSession(from, `Ok, dejé tu cita como estaba: *${formatFechaCorta(state.citaFechaOriginal)}* a las *${state.citaHoraOriginal}*. Escríbeme *hola* si necesitas algo más 👍`);
+      } else {
+        await chakraSendSession(from, `Responde *SÍ* para confirmar el cambio de tu cita o *NO* para dejarla como estaba.`);
+      }
+      return;
+    }
+
     // ── Quiere otro horario ──────────────────────────────────────────────────
     const esOtroHorario = [
       'otro horario', 'otra hora', 'otros horarios',
@@ -1233,7 +1481,7 @@ app.post('/webhook', async (req, res) => {
         if (!meridiano && hour >= 1 && hour <= 9) hour += 12;
         const horaSolicitada = `${String(hour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
 
-        if (ALL_SLOTS.includes(horaSolicitada)) {
+        if (getSlotsDelDia(fecha).includes(horaSolicitada)) {
           const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
           const todayStr = nowMX.toISOString().slice(0, 10);
           const esHoy = fecha === todayStr;
@@ -1255,8 +1503,10 @@ app.post('/webhook', async (req, res) => {
             const servicioSolicitado = extraerServicioDelMensaje(text);
             const digits10 = from.replace(/^52/, '').slice(-10);
 
-            if (disponiblesLaHora.length === 1) {
-              const barbero = disponiblesLaHora[0];
+            if (disponiblesLaHora.length >= 1) {
+              const nombreBuscado = normalizarTexto(text);
+              const barbero = disponiblesLaHora.find(b => nombreBuscado.includes(normalizarTexto(b.name)))
+                || disponiblesLaHora[Math.floor(Math.random() * disponiblesLaHora.length)];
               conversationState[from] = {
                 step: 'confirmando',
                 barberoId: barbero.id, barberoName: barbero.name,
@@ -1270,23 +1520,6 @@ app.post('/webhook', async (req, res) => {
                 `✅ *${barbero.name}* está libre a las *${horaSolicitada}* el *${fechaLabel}*.\n\n` +
                 `📋 *Resumen de tu cita:*\n👤 Barbero: *${barbero.name}*\n📅 Fecha: *${fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n💇 Servicio: *${servicioSolicitado || 'Corte Premium'}*\n\n` +
                 `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
-              );
-              return;
-            }
-
-            if (disponiblesLaHora.length > 1) {
-              conversationState[from] = {
-                step: 'esperando_seleccion',
-                fecha, fechaLabel,
-                serviceName: servicioSolicitado || 'Corte Premium',
-                clientPhone: digits10,
-                horaSeleccionada: horaSolicitada,
-              };
-              const nombres = disponiblesLaHora.map(b => `*${b.name}*`).join(', ');
-              await chakraSendSession(from,
-                `✅ A las *${horaSolicitada}* el *${fechaLabel}* tienes disponible a: ${nombres}.\n` +
-                `Responde con el *nombre del barbero* o simplemente escribe *cualquiera* y te asignamos al que tenga espacio.\n` +
-                `Ej: _${disponiblesLaHora[0].name}_ o _cualquiera_`
               );
               return;
             }
@@ -1332,7 +1565,7 @@ app.post('/webhook', async (req, res) => {
       const meridiano = horaMatch[3]?.toLowerCase().replace(/\./g, '');
       
       if (hour > 23 || hour < 0 || minutes > 59) {
-        await chakraSendSession(from, `Hora inválida 😅\nDime una hora entre *10:00* y *19:30*.`);
+        await chakraSendSession(from, `Hora inválida 😅\nDime una hora dentro de nuestro horario (${getHorarioLabel(state.fecha)}).`);
         return;
       }
       
@@ -1342,8 +1575,8 @@ app.post('/webhook', async (req, res) => {
       
       const horaSolicitada = `${String(hour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
       
-      if (!ALL_SLOTS.includes(horaSolicitada)) {
-        await chakraSendSession(from, `❌ No tenemos ese horario. Los slots son cada 30 minutos de *10:00* a *19:30*.`);
+      if (!getSlotsDelDia(state.fecha).includes(horaSolicitada)) {
+        await chakraSendSession(from, `❌ No tenemos ese horario. Los slots son cada 30 minutos, de *${getHorarioLabel(state.fecha)}*.`);
         return;
       }
 
@@ -1377,39 +1610,23 @@ app.post('/webhook', async (req, res) => {
       const servicioSolicitado = extraerServicioDelMensaje(text);
       const digits10 = from.replace(/^52/, '').slice(-10);
 
-      if (disponibles.length === 1) {
-        const barbero = disponibles[0];
-        conversationState[from] = {
-          step: 'confirmando',
-          barberoId: barbero.id, barberoName: barbero.name,
-          fecha: state.fecha, fechaLabel: state.fechaLabel,
-          hora: horaSolicitada,
-          horaSeleccionada: horaSolicitada,
-          clientPhone: digits10,
-          serviceName: servicioSolicitado || 'Corte Premium',
-        };
-        await chakraSendSession(from,
-          `✅ *${barbero.name}* está libre a las *${horaSolicitada}* el *${state.fechaLabel}*.\n\n` +
-          `📋 *Resumen de tu cita:*\n👤 Barbero: *${barbero.name}*\n📅 Fecha: *${state.fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n💇 Servicio: *${servicioSolicitado || 'Corte Premium'}*\n\n` +
-          `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
-        );
-        return;
-      }
+      const nombreBuscado = normalizarTexto(text);
+      const barbero = disponibles.find(b => nombreBuscado.includes(normalizarTexto(b.name)))
+        || disponibles[Math.floor(Math.random() * disponibles.length)];
 
-      conversationState[from] = { 
-        step: 'esperando_seleccion', 
-        fecha: state.fecha, 
-        fechaLabel: state.fechaLabel,
-        serviceName: servicioSolicitado || 'Corte Premium',
-        clientPhone: digits10,
+      conversationState[from] = {
+        step: 'confirmando',
+        barberoId: barbero.id, barberoName: barbero.name,
+        fecha: state.fecha, fechaLabel: state.fechaLabel,
+        hora: horaSolicitada,
         horaSeleccionada: horaSolicitada,
+        clientPhone: digits10,
+        serviceName: servicioSolicitado || 'Corte Premium',
       };
-      
-      const nombres = disponibles.map(b => `*${b.name}*`).join(', ');
       await chakraSendSession(from,
-        `✅ A las *${horaSolicitada}* el *${state.fechaLabel}* tienes disponible a: ${nombres}.\n` +
-        `Responde con el *nombre del barbero* o simplemente escribe *cualquiera* y te asignamos al que tenga espacio.\n` +
-        `Ej: _${disponibles[0].name}_ o _cualquiera_`
+        `✅ *${barbero.name}* está libre a las *${horaSolicitada}* el *${state.fechaLabel}*.\n\n` +
+        `📋 *Resumen de tu cita:*\n👤 Barbero: *${barbero.name}*\n📅 Fecha: *${state.fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n💇 Servicio: *${servicioSolicitado || 'Corte Premium'}*\n\n` +
+        `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
       );
       return;
     }
@@ -1560,9 +1777,9 @@ app.post('/webhook', async (req, res) => {
         
         const horaSolicitada = `${String(hour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
         
-        if (!ALL_SLOTS.includes(horaSolicitada)) {
+        if (!getSlotsDelDia(state.fecha).includes(horaSolicitada)) {
           await chakraSendSession(from,
-            `😅 La hora *${horaSolicitada}* no está en nuestro horario (10:00 – 19:30).\nDime otra hora o escribe *cancelar*.`
+            `😅 La hora *${horaSolicitada}* no está en nuestro horario (${getHorarioLabel(state.fecha)}).\nDime otra hora o escribe *cancelar*.`
           );
           return;
         }
@@ -1678,9 +1895,9 @@ app.post('/webhook', async (req, res) => {
         
         const horaSolicitada = `${String(hour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
 
-        if (!ALL_SLOTS.includes(horaSolicitada)) {
+        if (!getSlotsDelDia(state.fecha).includes(horaSolicitada)) {
           await chakraSendSession(from,
-            `😅 La hora *${horaSolicitada}* no está en nuestro horario (10:00 – 19:30).\nDime otra hora o escribe *cancelar*.`
+            `😅 La hora *${horaSolicitada}* no está en nuestro horario (${getHorarioLabel(state.fecha)}).\nDime otra hora o escribe *cancelar*.`
           );
           return;
         }
@@ -1788,7 +2005,13 @@ app.post('/webhook', async (req, res) => {
         const cliente = await obtenerOCrearCliente(digits10, state.clientName || null);
 
         if (!cliente) {
-          await chakraSendSession(from, `Hubo un error al registrar tus datos 😔 Por favor llámanos directamente.`);
+          await chakraSendSession(from, `¡Gracias! 🙌 Ya casi tenemos lista tu cita — en un momento el equipo te la confirma personalmente.`);
+          await alertarEquipoManual(
+            `No se pudo *registrar al cliente* al agendar por WhatsApp.\n` +
+            `Teléfono: ${digits10}\nNombre: ${state.clientName || '(sin nombre)'}\n` +
+            `Fecha/hora solicitada: ${state.fecha} ${state.hora} con ${state.barberoName}\nServicio: ${state.serviceName}\n\n` +
+            `Regístralo manualmente en el sistema.`
+          );
           delete conversationState[from];
           return;
         }
@@ -1797,7 +2020,13 @@ app.post('/webhook', async (req, res) => {
         const servicio = await obtenerOCrearServicio(state.serviceName || 'Corte Premium');
 
         if (!servicio) {
-          await chakraSendSession(from, `Hubo un error al obtener el servicio 😔 Por favor llámanos directamente.`);
+          await chakraSendSession(from, `¡Gracias! 🙌 Ya casi tenemos lista tu cita — en un momento el equipo te la confirma personalmente.`);
+          await alertarEquipoManual(
+            `No se pudo *obtener/crear el servicio* al agendar por WhatsApp.\n` +
+            `Cliente: ${cliente.name} (${cliente.phone})\n` +
+            `Fecha/hora solicitada: ${state.fecha} ${state.hora} con ${state.barberoName}\nServicio: ${state.serviceName}\n\n` +
+            `Regístralo manualmente en el sistema.`
+          );
           delete conversationState[from];
           return;
         }
@@ -1843,7 +2072,13 @@ app.post('/webhook', async (req, res) => {
         if (error) {
           console.error('❌ Error creando cita desde WhatsApp:', error.message);
           console.error('❌ Datos que causaron error:', JSON.stringify(citaData, null, 2));
-          await chakraSendSession(from, `Hubo un error al agendar tu cita 😔 Por favor llámanos directamente.`);
+          await chakraSendSession(from, `¡Gracias! 🙌 Ya casi tenemos lista tu cita — en un momento el equipo te la confirma personalmente.`);
+          await alertarEquipoManual(
+            `No se pudo *crear la cita* al agendar por WhatsApp.\n` +
+            `Cliente: ${cliente.name} (${cliente.phone})\n` +
+            `Fecha/hora: ${state.fecha} ${state.hora} con ${state.barberoName}\nServicio: ${servicio.name}\n` +
+            `Error: ${error.message}\n\nRegístralo manualmente en el sistema.`
+          );
           return;
         }
 
@@ -1929,7 +2164,7 @@ app.post('/webhook', async (req, res) => {
     // (excepto si ya trae una intención reconocible: saludo, agendar o precios/servicios)
     const esMensajeLargo   = text.length > 80;
     const esPreguntaComple = (text.match(/\?/g) || []).length > 1 || (text.length > 50 && text.includes('?'));
-    const tieneIntencionConocida = esHola || esAgendar || quiereCita || esPrecio;
+    const tieneIntencionConocida = esHola || esAgendar || quiereCita || esPrecio || esReagendar;
     if ((esMensajeLargo || esPreguntaComple) && !tieneIntencionConocida) {
       await chakraSendSession(from, `Hola 👋 Recibimos tu mensaje. Un momento, pronto te atendemos personalmente. 💈`);
       return;
@@ -2048,7 +2283,7 @@ app.post('/webhook', async (req, res) => {
     }
 
     await chakraSendSession(from,
-      `Hola ${firstName} 👋 Tienes una cita el *${cita.date}* a las *${cita.time}*.\n\nResponde:\n✅ *SÍ* para confirmar\n❌ *CANCELAR* para cancelar\n\nO escribe *hola* para ver horarios y agendar otra cita.`
+      `Hola ${firstName} 👋 Tienes una cita el *${cita.date}* a las *${cita.time}*.\n\nResponde:\n✅ *SÍ* para confirmar\n❌ *CANCELAR* para cancelar\n🔁 *REAGENDAR* para cambiarla de día u hora\n\nO escribe *hola* para ver horarios y agendar otra cita.`
     );
 
   } catch (err) {
