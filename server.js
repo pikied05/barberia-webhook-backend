@@ -48,8 +48,10 @@ const TEMPLATE_LANGUAGE_CANDIDATES = {
   barberia_recordatorio_24h:  ['es_MX'],
   barberia_confirmacion_cita: ['es_MX'],
   barberia_encuesta_servicio: ['es_MX'],
-  barberia_cupon_lealtad:     ['es_MX'],
-  barberia_reenganche:        ['en', 'en_GB', 'en_US', 'es_MX'],
+  clientes_en_riesgo_cupon:            ['es_MX'],
+  cliente_en_riesgo_reenganche:        ['en', 'en_GB', 'en_US', 'es_MX'],
+  clientes_en_riesgo_recordatorio_suave: ['es_MX'],
+  clientes_en_riesgo_encuesta_regreso:   ['es_MX'],
 };
 
 // ─── Plantillas que respetan el opt-out de mensajes automatizados ────────────
@@ -59,7 +61,7 @@ const TEMPLATE_LANGUAGE_CANDIDATES = {
 const AUTOMATED_TEMPLATES = [
   'barberia_recordatorio_24h',
   'barberia_confirmacion_cita',
-  'barberia_reenganche',
+  'cliente_en_riesgo_reenganche',
 ];
 
 // Verifica si un cliente (por teléfono) optó por no recibir mensajes automatizados
@@ -1206,7 +1208,7 @@ app.post('/webhook', async (req, res) => {
     // TEST_MODE = true  → solo responde a números en TEST_WHITELIST
     // TEST_MODE = false → responde a todos (producción normal)
     // ══════════════════════════════════════════════════════════════════════════
-    const TEST_MODE = true;
+    const TEST_MODE = false;
     const TEST_WHITELIST = [
       '5212711674600',
       '5215523297565'  // ← agrega aquí tus números de prueba (sin + ni espacios)
@@ -2442,7 +2444,7 @@ app.get('/run-encuestas', async (req, res) => {
 });
 
 app.get('/test-send', async (req, res) => {
-  const { to, template = 'barberia_reenganche', vars = 'Cliente' } = req.query;
+  const { to, template = 'cliente_en_riesgo_reenganche', vars = 'Cliente' } = req.query;
   if (!to) return res.status(400).json({ success: false, error: 'Falta ?to=52XXXXXXXXXX' });
   const variables = String(vars).split(',').map(v => v.trim());
   try {
