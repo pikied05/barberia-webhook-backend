@@ -52,6 +52,7 @@ const TEMPLATE_LANGUAGE_CANDIDATES = {
   cliente_en_riesgo_reenganche:        ['en', 'en_GB', 'en_US', 'es_MX'],
   clientes_en_riesgo_recordatorio_suave: ['es_MX'],
   clientes_en_riesgo_encuesta_regreso:   ['es_MX'],
+  alerta_staff_manual:        ['es_MX'],
 };
 
 // ─── Plantillas que respetan el opt-out de mensajes automatizados ────────────
@@ -102,17 +103,28 @@ async function chakraSendSession(to, message) {
 // un agendado/reagendado por sí sola (error de base de datos, etc.), para que
 // el equipo lo registre manualmente. Nunca debe tronar el flujo del cliente:
 // si el envío de la alerta falla, solo se loguea.
-async function alertarEquipoManual(mensaje) {
-  console.error(`🚨 ALERTA MANUAL: ${mensaje}`);
+async function alertarEquipoManual({ cliente, fechaHora, barbero, detalle }) {
+  const resumenLog = `Cliente: ${cliente} | Fecha/hora: ${fechaHora} | Barbero: ${barbero} | Detalle: ${detalle}`;
+  console.error(`🚨 ALERTA MANUAL: ${resumenLog}`);
   if (!BARBERSHOP_ALERT_PHONES.length) {
     console.warn('⚠️ BARBERSHOP_ALERT_PHONES no configurado — no se pudo notificar al staff.');
     return;
   }
   for (const numero of BARBERSHOP_ALERT_PHONES) {
     try {
-      await chakraSendSession(numero, `🚨 *Atención requerida*\n\n${mensaje}`);
+      await chakraSendTemplate(numero, 'alerta_staff_manual', [
+        cliente || 'No identificado',
+        fechaHora || 'No especificada',
+        barbero || 'No especificado',
+      ]);
     } catch (err) {
-      console.error(`❌ No se pudo enviar alerta manual a ${numero}:`, err.response?.data ?? err.message);
+      console.error(`❌ No se pudo enviar alerta (plantilla) a ${numero}:`, err.response?.data ?? err.message);
+      // Respaldo: intenta mensaje de sesión por si hay una ventana de 24h abierta.
+      try {
+        await chakraSendSession(numero, `🚨 *Atención requerida*\n\nCliente: ${cliente}\nFecha/hora: ${fechaHora}\nBarbero: ${barbero}\nDetalle: ${detalle}`);
+      } catch (err2) {
+        console.error(`❌ Tampoco se pudo enviar como sesión a ${numero}:`, err2.response?.data ?? err2.message);
+      }
     }
   }
 }
@@ -449,6 +461,23 @@ Ej: _15:00_ o _3 pm_`;
 // ─── Estado de conversación en memoria ───────────────────────────────────────
 const conversationState = {};
 
+// ─── Deduplicación de webhooks ────────────────────────────────────────────────
+// Meta puede reintentar la entrega del mismo webhook (ej. si el servidor tardó
+// en responder 200 OK), lo que provocaba que el mismo mensaje del cliente se
+// procesara dos veces y se enviaran respuestas duplicadas/contradictorias.
+const processedMessageIds = new Set();
+const MAX_PROCESSED_IDS = 500;
+function yaFueProcesado(wamid) {
+  if (!wamid) return false;
+  if (processedMessageIds.has(wamid)) return true;
+  processedMessageIds.add(wamid);
+  if (processedMessageIds.size > MAX_PROCESSED_IDS) {
+    const primero = processedMessageIds.values().next().value;
+    processedMessageIds.delete(primero);
+  }
+  return false;
+}
+
 // ─── Helpers de búsqueda ──────────────────────────────────────────────────────
 
 async function getClienteYCita(from) {
@@ -472,6 +501,32 @@ async function getClienteYCita(from) {
   }
 
   return { client, cita };
+}
+
+// Busca la cita cancelada más reciente del cliente (de ayer en adelante), para
+// poder ofrecer "reagendar" justo después de una cancelación sin que el cliente
+// tenga que volver a escribir todo desde cero.
+async function getCitaCanceladaReciente(from) {
+  const digits10 = from.replace(/^52/, '').slice(-10);
+  const { data: clientRows } = await supabase
+    .from('clients').select('id, name, phone').or(`phone.ilike.%${digits10}%`);
+  const client = clientRows?.[0] || null;
+  if (!client) return { client: null, cita: null };
+
+  const ayer = new Date();
+  ayer.setDate(ayer.getDate() - 1);
+  const ayerStr = ayer.toISOString().slice(0, 10);
+
+  const { data: citaRows } = await supabase
+    .from('appointments')
+    .select('id, date, time, status, barber_name, barber_id, service_name, service_id')
+    .eq('client_id', client.id)
+    .eq('status', 'cancelada')
+    .gte('date', ayerStr)
+    .order('id', { ascending: false })
+    .limit(1);
+
+  return { client, cita: citaRows?.[0] || null };
 }
 
 async function getEncuestaPendiente(from) {
@@ -919,7 +974,7 @@ async function confirmarHorarioPuntual(from, text, fechaDate, fechaLabel, state)
   };
   await chakraSendSession(from,
     `✅ *${barbero.name}* está libre a las *${horaSolicitada}* el *${fechaLabel}*.\n\n` +
-    `📋 *Resumen de tu cita:*\n👤 Barbero: *${barbero.name}*\n📅 Fecha: *${fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n💇 Servicio: *${servicioSolicitado}*\n\n` +
+    `📋 *Resumen de tu cita:*\n👤 Barbero: *${barbero.name}*\n📅 Fecha: *${fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n` +
     `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
   );
   return true;
@@ -1126,16 +1181,33 @@ async function obtenerOCrearCliente(phone, name = null) {
 // ─── Función para extraer servicio del mensaje ──────────────────────────────
 
 function extraerServicioDelMensaje(text) {
-  const palabrasClave = ['corte', 'barba', 'afeitado', 'premium', 'clásico', 'ejecutivo', 'especial', 'tinte', 'cejas', 'perfilado'];
-  const textoLower = text.toLowerCase();
-  
-  for (const palabra of palabrasClave) {
-    if (textoLower.includes(palabra)) {
-      // Buscar la frase completa que contiene la palabra clave
-      const match = text.match(new RegExp(`([a-záéíóúñA-ZÁÉÍÓÚÑ\\s]+${palabra}[a-záéíóúñA-ZÁÉÍÓÚÑ\\s]+)`, 'i'));
-      if (match) {
-        return match[0].trim();
-      }
+  const textoLower = normalizarTexto(text);
+
+  // Combos específicos primero (más específico gana), luego servicios individuales.
+  // El nombre de la izquierda es lo que se busca en el texto; el de la derecha es
+  // el nombre canónico que se guarda/muestra.
+  const candidatos = [
+    { patron: /corte\s*y\s*barba|barba\s*y\s*corte/, nombre: 'Corte y Barba' },
+    { patron: /corte\s*(de\s*)?barba/, nombre: 'Corte y Barba' }, // "corte de barba" = quiere ambos
+    { patron: /\bbarba\b/, nombre: 'Barba' },
+    { patron: /\bafeitado\b/, nombre: 'Afeitado' },
+    { patron: /\btinte\b/, nombre: 'Tinte' },
+    { patron: /\bcejas\b/, nombre: 'Perfilado de Cejas' },
+    { patron: /\bperfilado\b/, nombre: 'Perfilado de Cejas' },
+    { patron: /corte\s*(premium|clasico|ejecutivo|especial)/, nombre: null }, // se resuelve abajo con el modificador
+    { patron: /\bcorte\b/, nombre: 'Corte Premium' },
+  ];
+
+  for (const { patron, nombre } of candidatos) {
+    const match = textoLower.match(patron);
+    if (match) {
+      if (nombre) return nombre;
+      // Caso "corte premium/clasico/ejecutivo/especial" → arma el nombre con el modificador
+      const modificador = match[1];
+      const nombreBonito = modificador
+        .replace('clasico', 'Clásico')
+        .replace(/^./, c => c.toUpperCase());
+      return `Corte ${nombreBonito}`;
     }
   }
   return null;
@@ -1165,6 +1237,11 @@ app.post('/webhook', async (req, res) => {
 
     const msg  = messages[0];
     const from = msg.from;
+
+    if (yaFueProcesado(msg.id)) {
+      console.log(`♻️ Webhook duplicado ignorado (wamid ${msg.id})`);
+      return;
+    }
 
     if (msg.type === 'interactive') {
       const buttonReply = msg.interactive?.button_reply;
@@ -1208,7 +1285,7 @@ app.post('/webhook', async (req, res) => {
     // TEST_MODE = true  → solo responde a números en TEST_WHITELIST
     // TEST_MODE = false → responde a todos (producción normal)
     // ══════════════════════════════════════════════════════════════════════════
-    const TEST_MODE = true;
+    const TEST_MODE = process.env.TEST_MODE === 'false'; // por defecto false: producción responde a todos
     const TEST_WHITELIST = [
       '5212711674600',
       '5215523297565'  // ← agrega aquí tus números de prueba (sin + ni espacios)
@@ -1260,7 +1337,18 @@ app.post('/webhook', async (req, res) => {
     const enFlujoReagendar = ['reagendar_fecha', 'reagendar_seleccion', 'reagendar_confirmando'].includes(state?.step);
 
     if (esReagendar && !enFlujoReagendar) {
-      const { client: clienteReagendar, cita: citaReagendar } = await getClienteYCita(from);
+      let { client: clienteReagendar, cita: citaReagendar } = await getClienteYCita(from);
+
+      // Si no tiene cita activa, puede ser que se la acaben de cancelar
+      // (ej. el staff canceló y ofreció reagendar en el mismo momento).
+      if (!citaReagendar) {
+        const fallback = await getCitaCanceladaReciente(from);
+        if (fallback.client && fallback.cita) {
+          clienteReagendar = fallback.client;
+          citaReagendar = fallback.cita;
+        }
+      }
+
       const nombreReagendar = clienteReagendar?.name?.split(' ')[0] || 'amigo';
 
       if (!clienteReagendar || !citaReagendar) {
@@ -1280,8 +1368,12 @@ app.post('/webhook', async (req, res) => {
         clientPhone: clienteReagendar.phone,
       };
 
+      const eraDeYaCancelada = citaReagendar.status === 'cancelada';
+      const fraseSinCancelar = eraDeYaCancelada
+        ? `Vamos a reagendar tu cita del *${formatFechaCorta(citaReagendar.date)}* a las *${citaReagendar.time}*`
+        : `Vamos a cambiar tu cita del *${formatFechaCorta(citaReagendar.date)}* a las *${citaReagendar.time}*, sin cancelarla`;
       await chakraSendSession(from,
-        `¡Claro ${nombreReagendar}! Vamos a cambiar tu cita del *${formatFechaCorta(citaReagendar.date)}* a las *${citaReagendar.time}*, sin cancelarla. 🙌\n\n¿Para qué día la quieres? (ej. _viernes_, _mañana_, _10 de julio_)`
+        `¡Claro ${nombreReagendar}! ${fraseSinCancelar}. 🙌\n\n¿Para qué día la quieres? (ej. _viernes_, _mañana_, _10 de julio_)`
       );
       return;
     }
@@ -1370,7 +1462,7 @@ app.post('/webhook', async (req, res) => {
         barberoName: barberoElegido.name,
       };
       await chakraSendSession(from,
-        `📋 *Nuevo horario de tu cita:*\n👤 Barbero: *${barberoElegido.name}*\n📅 Fecha: *${state.fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n💇 Servicio: *${state.serviceName}*\n\n` +
+        `📋 *Nuevo horario de tu cita:*\n👤 Barbero: *${barberoElegido.name}*\n📅 Fecha: *${state.fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n` +
         `¿Confirmas el cambio?\n✅ Responde *SÍ* para actualizar tu cita\n❌ Responde *NO* para dejarla como estaba`
       );
       return;
@@ -1408,13 +1500,12 @@ app.post('/webhook', async (req, res) => {
         if (error) {
           console.error('❌ Error reagendando cita:', error.message);
           await chakraSendSession(from, `¡Gracias! 🙌 Ya casi tenemos listo tu cambio de cita — en un momento el equipo te lo confirma personalmente.`);
-          await alertarEquipoManual(
-            `No se pudo *reagendar automáticamente* la cita ${state.citaId}.\n` +
-            `Cliente: ${state.clientPhone || from}\n` +
-            `Cita original: ${state.citaFechaOriginal} ${state.citaHoraOriginal}\n` +
-            `Nueva fecha/hora solicitada: ${state.fecha} ${state.hora} con ${state.barberoName}\n` +
-            `Error: ${error.message}\n\nRegístralo manualmente en el sistema.`
-          );
+          await alertarEquipoManual({
+            cliente: state.clientPhone || from,
+            fechaHora: `${state.fecha} ${state.hora} (cita original: ${state.citaFechaOriginal} ${state.citaHoraOriginal})`,
+            barbero: state.barberoName,
+            detalle: `No se pudo reagendar automáticamente la cita ${state.citaId}. Error: ${error.message}`,
+          });
           return;
         }
 
@@ -1520,7 +1611,7 @@ app.post('/webhook', async (req, res) => {
               };
               await chakraSendSession(from,
                 `✅ *${barbero.name}* está libre a las *${horaSolicitada}* el *${fechaLabel}*.\n\n` +
-                `📋 *Resumen de tu cita:*\n👤 Barbero: *${barbero.name}*\n📅 Fecha: *${fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n💇 Servicio: *${servicioSolicitado || 'Corte Premium'}*\n\n` +
+                `📋 *Resumen de tu cita:*\n👤 Barbero: *${barbero.name}*\n📅 Fecha: *${fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n` +
                 `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
               );
               return;
@@ -1627,7 +1718,7 @@ app.post('/webhook', async (req, res) => {
       };
       await chakraSendSession(from,
         `✅ *${barbero.name}* está libre a las *${horaSolicitada}* el *${state.fechaLabel}*.\n\n` +
-        `📋 *Resumen de tu cita:*\n👤 Barbero: *${barbero.name}*\n📅 Fecha: *${state.fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n💇 Servicio: *${servicioSolicitado || 'Corte Premium'}*\n\n` +
+        `📋 *Resumen de tu cita:*\n👤 Barbero: *${barbero.name}*\n📅 Fecha: *${state.fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n` +
         `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
       );
       return;
@@ -1709,7 +1800,7 @@ app.post('/webhook', async (req, res) => {
           `👤 Barbero: *${barberoAsignado.name}*\n` +
           `📅 Fecha: *${state.fechaLabel}*\n` +
           `🕐 Hora: *${horaAsignada}*\n` +
-          `💇 Servicio: *${servicioSolicitado}*\n\n` +
+          `` +
           `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
         );
         return;
@@ -1835,7 +1926,7 @@ app.post('/webhook', async (req, res) => {
           `👤 Barbero: *${barbero.name}*\n` +
           `📅 Fecha: *${state.fechaLabel}*\n` +
           `🕐 Hora: *${horaSolicitada}*\n` +
-          `💇 Servicio: *${servicioSolicitado}*\n\n` +
+          `` +
           `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
         );
         return;
@@ -1879,7 +1970,7 @@ app.post('/webhook', async (req, res) => {
             `👤 Barbero: *${barberoSolo.name}*\n` +
             `📅 Fecha: *${state.fechaLabel}*\n` +
             `🕐 Hora: *${state.horaSeleccionada}*\n` +
-            `💇 Servicio: *${servicioSolicitado}*\n\n` +
+            `` +
             `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
           );
           return;
@@ -1947,7 +2038,7 @@ app.post('/webhook', async (req, res) => {
 
         await chakraSendSession(from,
           `✅ ¡Perfecto! Te asignamos con *${barberoAsignado.name}* a las *${horaSolicitada}* el *${state.fechaLabel}*.\n\n` +
-          `📋 *Resumen de tu cita:*\n👤 Barbero: *${barberoAsignado.name}*\n📅 Fecha: *${state.fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n💇 Servicio: *${servicioSolicitado}*\n\n` +
+          `📋 *Resumen de tu cita:*\n👤 Barbero: *${barberoAsignado.name}*\n📅 Fecha: *${state.fechaLabel}*\n🕐 Hora: *${horaSolicitada}*\n` +
           `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
         );
         return;
@@ -1994,7 +2085,7 @@ app.post('/webhook', async (req, res) => {
             `👤 Barbero: *${barberoCambio.name}*\n` +
             `📅 Fecha: *${state.fechaLabel}*\n` +
             `🕐 Hora: *${state.hora}*\n` +
-            `💇 Servicio: *${state.serviceName}*\n\n` +
+            `` +
             `¿Confirmas?\n✅ Responde *SÍ* para agendar\n❌ Responde *NO* para cancelar`
           );
           return;
@@ -2008,12 +2099,12 @@ app.post('/webhook', async (req, res) => {
 
         if (!cliente) {
           await chakraSendSession(from, `¡Gracias! 🙌 Ya casi tenemos lista tu cita — en un momento el equipo te la confirma personalmente.`);
-          await alertarEquipoManual(
-            `No se pudo *registrar al cliente* al agendar por WhatsApp.\n` +
-            `Teléfono: ${digits10}\nNombre: ${state.clientName || '(sin nombre)'}\n` +
-            `Fecha/hora solicitada: ${state.fecha} ${state.hora} con ${state.barberoName}\nServicio: ${state.serviceName}\n\n` +
-            `Regístralo manualmente en el sistema.`
-          );
+          await alertarEquipoManual({
+            cliente: `${state.clientName || '(sin nombre)'} (${digits10})`,
+            fechaHora: `${state.fecha} ${state.hora}`,
+            barbero: state.barberoName,
+            detalle: `No se pudo registrar al cliente al agendar por WhatsApp. Servicio: ${state.serviceName}`,
+          });
           delete conversationState[from];
           return;
         }
@@ -2023,12 +2114,12 @@ app.post('/webhook', async (req, res) => {
 
         if (!servicio) {
           await chakraSendSession(from, `¡Gracias! 🙌 Ya casi tenemos lista tu cita — en un momento el equipo te la confirma personalmente.`);
-          await alertarEquipoManual(
-            `No se pudo *obtener/crear el servicio* al agendar por WhatsApp.\n` +
-            `Cliente: ${cliente.name} (${cliente.phone})\n` +
-            `Fecha/hora solicitada: ${state.fecha} ${state.hora} con ${state.barberoName}\nServicio: ${state.serviceName}\n\n` +
-            `Regístralo manualmente en el sistema.`
-          );
+          await alertarEquipoManual({
+            cliente: `${cliente.name} (${cliente.phone})`,
+            fechaHora: `${state.fecha} ${state.hora}`,
+            barbero: state.barberoName,
+            detalle: `No se pudo obtener/crear el servicio "${state.serviceName}" al agendar por WhatsApp.`,
+          });
           delete conversationState[from];
           return;
         }
@@ -2075,12 +2166,12 @@ app.post('/webhook', async (req, res) => {
           console.error('❌ Error creando cita desde WhatsApp:', error.message);
           console.error('❌ Datos que causaron error:', JSON.stringify(citaData, null, 2));
           await chakraSendSession(from, `¡Gracias! 🙌 Ya casi tenemos lista tu cita — en un momento el equipo te la confirma personalmente.`);
-          await alertarEquipoManual(
-            `No se pudo *crear la cita* al agendar por WhatsApp.\n` +
-            `Cliente: ${cliente.name} (${cliente.phone})\n` +
-            `Fecha/hora: ${state.fecha} ${state.hora} con ${state.barberoName}\nServicio: ${servicio.name}\n` +
-            `Error: ${error.message}\n\nRegístralo manualmente en el sistema.`
-          );
+          await alertarEquipoManual({
+            cliente: `${cliente.name} (${cliente.phone})`,
+            fechaHora: `${state.fecha} ${state.hora}`,
+            barbero: state.barberoName,
+            detalle: `No se pudo crear la cita (servicio: ${servicio.name}) al agendar por WhatsApp. Error: ${error.message}`,
+          });
           return;
         }
 
@@ -2158,7 +2249,11 @@ app.post('/webhook', async (req, res) => {
     }
 
     const esHola    = ['hola', 'hello', 'hi', 'buenas', 'buenos', 'buen dia', 'buen día', 'hey'].some(k => textLower.includes(k));
-    const esAgendar = ['agendar', 'cita', 'appointment', 'reservar', 'turno', 'espacio', 'disponibilidad'].some(k => textLower.includes(k));
+    const pareceHoraCita = /\d{1,2}(:\d{2})?\s*(am|pm|a\.?m\.?|p\.?m\.?|hrs?|horas?)\b/i.test(text)
+      || /\b\d{1,2}:\d{2}\b/.test(text);
+    const pareceFechaCita = !state && !!parsearFechaPedida(text);
+    const esAgendar = ['agendar', 'cita', 'appointment', 'reservar', 'turno', 'espacio', 'disponibilidad'].some(k => textLower.includes(k))
+      || pareceHoraCita || pareceFechaCita;
     const quiereCita = ['sí', 'si', 'yes', 'claro', 'por favor', 'quiero', 'reserva', 'reservar', 'aparta', 'apartar', 'anota', 'anotar'].some(k => textLower.includes(k));
     const esPrecio  = ['precio', 'precios', 'cuanto cuesta', 'cuánto cuesta', 'costo', 'servicio', 'servicios'].some(k => textLower.includes(k));
 
