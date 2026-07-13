@@ -1123,35 +1123,18 @@ async function obtenerOCrearCliente(phone, name = null) {
 
   // Crear nuevo cliente
   const nombreCliente = name || 'Cliente WhatsApp';
+  // loyalty_level es NOT NULL y tiene un check constraint que solo acepta
+  // 'bronce' | 'plata' | 'oro' | 'platino'. Un cliente nuevo arranca en 'bronce'.
   let { data: newClient, error } = await supabase
     .from('clients')
     .insert([{
       name: nombreCliente,
       phone: digits10,
-      loyalty_level: 'nuevo',
+      loyalty_level: 'bronce',
       created_at: new Date().toISOString(),
     }])
     .select()
     .single();
-
-  // Si el error es por el check constraint de loyalty_level (el valor 'nuevo'
-  // no está entre los permitidos por la tabla), reintentamos sin mandar ese
-  // campo y dejamos que la base de datos aplique su propio default, en vez de
-  // tronar todo el agendado por un valor que no coincide con el constraint.
-  if (error && /loyalty_level/i.test(error.message || '')) {
-    console.warn('⚠️ loyalty_level rechazado por constraint, reintentando sin ese campo:', error.message);
-    const retry = await supabase
-      .from('clients')
-      .insert([{
-        name: nombreCliente,
-        phone: digits10,
-        created_at: new Date().toISOString(),
-      }])
-      .select()
-      .single();
-    newClient = retry.data;
-    error = retry.error;
-  }
 
   if (error) {
     console.error('❌ Error creando cliente:', error.message);
@@ -1285,7 +1268,7 @@ app.post('/webhook', async (req, res) => {
     // TEST_MODE = true  → solo responde a números en TEST_WHITELIST
     // TEST_MODE = false → responde a todos (producción normal)
     // ══════════════════════════════════════════════════════════════════════════
-    const TEST_MODE = process.env.TEST_MODE === 'false'; // por defecto false: producción responde a todos
+    const TEST_MODE = process.env.TEST_MODE === 'true'; // por defecto false: producción responde a todos
     const TEST_WHITELIST = [
       '5212711674600',
       '5215523297565'  // ← agrega aquí tus números de prueba (sin + ni espacios)
