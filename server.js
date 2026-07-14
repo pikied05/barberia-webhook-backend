@@ -2601,21 +2601,35 @@ async function enviarEncuestas(etiqueta = '') {
 
   console.log(`📋 [${etiqueta}] ${citas.length} cita(s) pendientes de encuesta`);
 
+  // Agrupar por cliente (teléfono): si tuvo varias citas el mismo día, solo se
+  // manda UNA encuesta, usando la cita más reciente como referencia.
+  const citasPorCliente = new Map();
   for (const cita of citas) {
     if (!cita.client_phone) { console.warn(`⚠️ Cita ${cita.id} sin teléfono`); continue; }
+    const grupo = citasPorCliente.get(cita.client_phone) || [];
+    grupo.push(cita);
+    citasPorCliente.set(cita.client_phone, grupo);
+  }
+
+  for (const [telefono, grupo] of citasPorCliente) {
+    const citaReferencia = grupo[grupo.length - 1];
     try {
-      await chakraSendTemplate(cita.client_phone, 'barberia_encuesta_servicio', [
-        cita.client_name?.split(' ')[0] ?? 'Cliente',
-        formatFechaCorta(cita.date),
+      await chakraSendTemplate(telefono, 'barberia_encuesta_servicio', [
+        citaReferencia.client_name?.split(' ')[0] ?? 'Cliente',
+        formatFechaCorta(citaReferencia.date),
       ]);
+      // Marcar TODAS las citas del cliente ese día como enviadas, aunque solo
+      // se haya mandado una plantilla, para que ninguna quede pendiente y
+      // dispare un envío duplicado en la próxima corrida del cron.
+      const idsDelGrupo = grupo.map(c => c.id);
       await supabase.from('appointments').update({
         survey_sent: true,
         survey_sent_at: new Date().toISOString(),
-      }).eq('id', cita.id);
-      console.log(`✅ Encuesta enviada a ${cita.client_name} (${cita.client_phone})`);
+      }).in('id', idsDelGrupo);
+      console.log(`✅ Encuesta enviada a ${citaReferencia.client_name} (${telefono}) — ${grupo.length} cita(s) agrupada(s)`);
       await new Promise(r => setTimeout(r, 1000));
     } catch (sendErr) {
-      console.error(`❌ Error enviando encuesta a ${cita.client_name}:`, sendErr.response?.data || sendErr.message);
+      console.error(`❌ Error enviando encuesta a ${citaReferencia.client_name}:`, sendErr.response?.data || sendErr.message);
     }
   }
 }
