@@ -535,14 +535,26 @@ async function getEncuestaPendiente(from) {
   limiteFecha.setDate(limiteFecha.getDate() - 3);
   const { data } = await supabase
     .from('appointments')
-    .select('id, date')
+    .select('id, date, survey_feedback, survey_responded_at')
     .ilike('client_phone', `%${digits10}%`)
     .eq('survey_sent', true)
-    .is('survey_responded_at', null)
     .gte('survey_sent_at', limiteFecha.toISOString())
     .order('date', { ascending: false })
     .limit(1);
-  return data?.[0] || null;
+  const cita = data?.[0] || null;
+  if (!cita) return null;
+
+  // Ventana de gracia: si ya respondió, seguimos aceptando mensajes de
+  // seguimiento como parte de la misma encuesta durante 15 minutos, para que
+  // si el cliente escribe varios mensajes seguidos no se le corte a la mitad.
+  const VENTANA_GRACIA_MS = 15 * 60 * 1000;
+  const yaRespondida = !!cita.survey_responded_at;
+  const dentroDeGracia = yaRespondida
+    ? (Date.now() - new Date(cita.survey_responded_at).getTime()) < VENTANA_GRACIA_MS
+    : true;
+
+  if (!dentroDeGracia) return null;
+  return cita;
 }
 
 // ─── Health ───────────────────────────────────────────────────────────────────
@@ -2206,19 +2218,46 @@ app.post('/webhook', async (req, res) => {
       return;
     }
 
-    // ── Encuesta pendiente ────────────────────────────────────────────────────
+    // ── Pregunta: ¿hacen corte para niños? ──────────────────────────────────
+    const esPreguntaCorteNino = [
+      'corte de niño', 'corte para niño', 'corte niño', 'cortas pelo para un niño',
+      'cortan pelo a niños', 'corte de niña', 'corte para niña', 'cortes infantiles',
+      'corte infantil', 'para niños', 'niños cortan', 'hacen cortes a niños',
+    ].some(k => textLower.includes(k));
+
+    if (esPreguntaCorteNino) {
+      await chakraSendSession(from,
+        `¡Sí! 🙌 En Imperium Caesar's Barber Club sí hacemos cortes para niños. Escribe *hola* para ver horarios disponibles y agendar su cita. 💈`
+      );
+      return;
+    }
+
+    // ── Encuesta pendiente (o recién respondida, dentro de la ventana de gracia) ─
     const encuestaPendiente = await getEncuestaPendiente(from);
     if (encuestaPendiente) {
-      const { client: clienteEncuesta } = await getClienteYCita(from);
-      const firstNameEncuesta = clienteEncuesta?.name?.split(' ')[0] || 'amigo';
+      const esPrimeraRespuesta = !encuestaPendiente.survey_responded_at;
+      const feedbackAcumulado = esPrimeraRespuesta
+        ? text
+        : `${encuestaPendiente.survey_feedback || ''}\n${text}`.trim();
+
       await supabase.from('appointments').update({
-        survey_feedback: text,
+        survey_feedback: feedbackAcumulado,
         survey_responded_at: new Date().toISOString(),
       }).eq('id', encuestaPendiente.id);
-      await chakraSendSession(from,
-        `¡Muchas gracias por contarnos, ${firstNameEncuesta}! 🙏 Tomamos en cuenta tu comentario para seguir mejorando.`
-      );
-      console.log(`⭐ Encuesta respondida: cita ${encuestaPendiente.id}`);
+
+      if (esPrimeraRespuesta) {
+        const { client: clienteEncuesta } = await getClienteYCita(from);
+        const firstNameEncuesta = clienteEncuesta?.name?.split(' ')[0] || 'amigo';
+        await chakraSendSession(from,
+          `¡Muchas gracias por contarnos, ${firstNameEncuesta}! 🙏 Tomamos en cuenta tu comentario para seguir mejorando.`
+        );
+        console.log(`⭐ Encuesta respondida: cita ${encuestaPendiente.id}`);
+      } else {
+        // Mensaje adicional de seguimiento: solo confirmamos brevemente, sin
+        // repetir todo el mensaje de agradecimiento ni caer en otro flujo.
+        await chakraSendSession(from, `¡Anotado, gracias! 🙌`);
+        console.log(`⭐ Encuesta ampliada: cita ${encuestaPendiente.id}`);
+      }
       return;
     }
 
