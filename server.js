@@ -461,6 +461,57 @@ Ej: _15:00_ o _3 pm_`;
 // ─── Estado de conversación en memoria ───────────────────────────────────────
 const conversationState = {};
 
+// ─── Pausa de automatización por respuesta manual del staff ──────────────────
+// Cuando alguien del equipo contesta a mano desde la app de WhatsApp Business
+// (o web.whatsapp.com), Chakra manda un evento 'smb_message_echo'. Mientras
+// esté en esta ventana de pausa, el bot no contesta a ese cliente, para no
+// pisarle la respuesta manual al staff.
+const pausadoHasta = new Map(); // telefono (10 dígitos) -> timestamp
+const MINUTOS_PAUSA_POR_RESPUESTA_MANUAL = 30;
+
+function digitos10(numero) {
+  return String(numero || '').replace(/^52/, '').slice(-10);
+}
+
+function pausarAutomatizacion(telefono, minutos = MINUTOS_PAUSA_POR_RESPUESTA_MANUAL) {
+  const key = digitos10(telefono);
+  pausadoHasta.set(key, Date.now() + minutos * 60 * 1000);
+  console.log(`⏸️ Automatización pausada ${minutos} min para ${key} (respuesta manual del staff)`);
+}
+
+function estaPausado(telefono) {
+  const key = digitos10(telefono);
+  const hasta = pausadoHasta.get(key);
+  return !!hasta && Date.now() < hasta;
+}
+
+// Endpoint separado para el "Chakra Events Webhook" (formato { event, payload }),
+// distinto del pass-through de Meta que llega a /webhook.
+app.post('/webhook-chakra', (req, res) => {
+  res.sendStatus(200);
+  try {
+    const { event, payload } = req.body || {};
+    console.log(`📡 Chakra event: ${event}`, JSON.stringify(payload)?.slice(0, 300));
+
+    if (event === 'smb_message_echo') {
+      // El número del cliente puede venir en distintos campos según el tipo
+      // de mensaje; probamos los más comunes.
+      const telefonoCliente = payload?.to
+        || payload?.recipient_id
+        || payload?.contacts?.[0]?.wa_id
+        || payload?.messages?.[0]?.to;
+
+      if (telefonoCliente) {
+        pausarAutomatizacion(telefonoCliente);
+      } else {
+        console.warn('⚠️ smb_message_echo sin teléfono identificable, revisar payload:', JSON.stringify(payload));
+      }
+    }
+  } catch (err) {
+    console.error('❌ Error procesando webhook de Chakra:', err.message);
+  }
+});
+
 // ─── Deduplicación de webhooks ────────────────────────────────────────────────
 // Meta puede reintentar la entrega del mismo webhook (ej. si el servidor tardó
 // en responder 200 OK), lo que provocaba que el mismo mensaje del cliente se
@@ -1232,6 +1283,11 @@ app.post('/webhook', async (req, res) => {
 
     const msg  = messages[0];
     const from = msg.from;
+
+    if (estaPausado(from)) {
+      console.log(`⏸️ Automatización pausada para ${from}, se ignora su mensaje`);
+      return;
+    }
 
     if (yaFueProcesado(msg.id)) {
       console.log(`♻️ Webhook duplicado ignorado (wamid ${msg.id})`);
