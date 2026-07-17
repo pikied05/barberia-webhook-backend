@@ -263,7 +263,19 @@ function formatFechaCorta(ymd) {
   return `${parseInt(d, 10)} de ${meses[parseInt(m, 10) - 1] || ymd}`;
 }
 
-async function getSlotsLibres(barberId, dateStr, filtroHoraActual = null) {
+async function buscarDuracionServicio(nombreServicio) {
+  if (!nombreServicio) return null;
+  const nombreNormalizado = normalizarTexto(nombreServicio);
+  const { data: servicios } = await supabase.from('services').select('name, duration').eq('active', true);
+  for (const s of (servicios || [])) {
+    if (normalizarTexto(s.name).includes(nombreNormalizado) || nombreNormalizado.includes(normalizarTexto(s.name))) {
+      return s.duration || null;
+    }
+  }
+  return null;
+}
+
+async function getSlotsLibres(barberId, dateStr, filtroHoraActual = null, duracionMinutos = 60) {
   const { data: citas } = await supabase
     .from('appointments')
     .select('time, duration_minutes')
@@ -296,7 +308,7 @@ async function getSlotsLibres(barberId, dateStr, filtroHoraActual = null) {
     
     const [h, m] = slot.split(':').map(Number);
     const startTotal = h * 60 + m;
-    for (let i = 0; i < 60; i += 30) {
+    for (let i = 0; i < duracionMinutos; i += 30) {
       const needed = startTotal + i;
       if (needed > cierreMinutos) return false; // se pasaría de la hora de cierre
       const nh = String(Math.floor(needed / 60)).padStart(2, '0');
@@ -606,6 +618,25 @@ async function getEncuestaPendiente(from) {
 
   if (!dentroDeGracia) return null;
   return cita;
+}
+
+// Extrae una calificación del 1 al 10 de un mensaje de texto libre.
+// Prioriza patrones explícitos ("9/10", "8 de 10") antes que un número suelto,
+// para evitar confundir con otros números que el cliente pudiera mencionar.
+function extractRating(text) {
+  const patterns = [
+    /\b(10|[1-9])\s*\/\s*10\b/,      // "9/10"
+    /\b(10|[1-9])\s+de\s+10\b/i,     // "9 de 10"
+    /\b(10|[1-9])\b/,                // número suelto del 1 al 10
+  ];
+  for (const p of patterns) {
+    const m = text.match(p);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (n >= 1 && n <= 10) return n;
+    }
+  }
+  return null;
 }
 
 // ─── Health ───────────────────────────────────────────────────────────────────
@@ -1006,10 +1037,53 @@ async function confirmarHorarioPuntual(from, text, fechaDate, fechaLabel, state)
     return schedule.some(d => normalizarTexto(d) === normalizarTexto(dayName));
   });
 
+  // ¿El cliente mencionó un barbero específico por nombre?
+  const nombreBuscadoPrevio = normalizarTexto(text);
+  const barberoNombrado = barberosDelDia.find(b => nombreBuscadoPrevio.includes(normalizarTexto(b.name)));
+
+  // Duración: default 60 min. Solo si el cliente mencionó explícitamente el
+  // servicio (ej. "barba") usamos su duración real — nunca se le pregunta.
+  const servicioMencionado = extraerServicioDelMensaje(text) || state?.serviceName || null;
+  const duracionDetectada = (await buscarDuracionServicio(servicioMencionado)) || 60;
+
   const disponibles = [];
   for (const b of barberosDelDia) {
-    const slotsLibres = await getSlotsLibres(b.id, dateStr, esHoy ? horaActual : null);
+    const slotsLibres = await getSlotsLibres(b.id, dateStr, esHoy ? horaActual : null, duracionDetectada);
     if (slotsLibres.includes(horaSolicitada)) disponibles.push(b);
+  }
+
+  // Si pidió un barbero puntual y ese barbero no está en los disponibles a esa
+  // hora (pero sí trabaja ese día), le ofrecemos sus horarios más cercanos en
+  // vez de rechazarlo sin más o asignarle a otro barbero sin avisar.
+  if (barberoNombrado && !disponibles.some(b => b.id === barberoNombrado.id)) {
+    const slotsDeEse = await getSlotsLibres(barberoNombrado.id, dateStr, esHoy ? horaActual : null, duracionDetectada);
+    if (!slotsDeEse.length) {
+      conversationState[from] = { step: 'esperando_hora_especifica', fecha: dateStr, fechaLabel };
+      await chakraSendSession(from,
+        `😔 *${barberoNombrado.name}* no tiene horarios libres el *${fechaLabel}*.\n¿Quieres otro día, o que te asigne otro barbero disponible?`
+      );
+      return true;
+    }
+    const [hReq, mReq] = horaSolicitada.split(':').map(Number);
+    const minutosReq = hReq * 60 + mReq;
+    const cercanos = [...slotsDeEse]
+      .sort((a, b2) => {
+        const [ha, ma] = a.split(':').map(Number);
+        const [hb, mb] = b2.split(':').map(Number);
+        return Math.abs((ha * 60 + ma) - minutosReq) - Math.abs((hb * 60 + mb) - minutosReq);
+      })
+      .slice(0, 3)
+      .sort();
+
+    conversationState[from] = {
+      step: 'esperando_hora_especifica', fecha: dateStr, fechaLabel,
+      barberoPreferidoId: barberoNombrado.id, barberoPreferidoName: barberoNombrado.name,
+    };
+    await chakraSendSession(from,
+      `😔 *${barberoNombrado.name}* no está libre a las *${horaSolicitada}*, ya tiene una cita a esa hora.\n\n` +
+      `Sus horarios más cercanos el *${fechaLabel}* son: *${cercanos.join(', ')}*.\n¿Cuál prefieres? (o dime otra hora/día)`
+    );
+    return true;
   }
 
   if (!disponibles.length) {
@@ -1737,10 +1811,13 @@ app.post('/webhook', async (req, res) => {
         }
       }
 
+      const servicioSolicitado = extraerServicioDelMensaje(text) || state?.serviceName || null;
+      const duracionDetectada = (await buscarDuracionServicio(servicioSolicitado)) || 60;
+
       const { data: barberos } = await supabase.from('barbers').select('id, name').eq('active', true);
       const disponibles = [];
       for (const barbero of (barberos || [])) {
-        const slotsLibres = await getSlotsLibres(barbero.id, state.fecha, esHoy ? horaActual : null);
+        const slotsLibres = await getSlotsLibres(barbero.id, state.fecha, esHoy ? horaActual : null, duracionDetectada);
         if (slotsLibres.includes(horaSolicitada)) disponibles.push(barbero);
       }
 
@@ -1751,11 +1828,11 @@ app.post('/webhook', async (req, res) => {
         return;
       }
 
-      const servicioSolicitado = extraerServicioDelMensaje(text);
       const digits10 = from.replace(/^52/, '').slice(-10);
 
       const nombreBuscado = normalizarTexto(text);
-      const barbero = disponibles.find(b => nombreBuscado.includes(normalizarTexto(b.name)))
+      const barbero = (state.barberoPreferidoId && disponibles.find(b => b.id === state.barberoPreferidoId))
+        || disponibles.find(b => nombreBuscado.includes(normalizarTexto(b.name)))
         || disponibles[Math.floor(Math.random() * disponibles.length)];
 
       conversationState[from] = {
@@ -2296,10 +2373,18 @@ app.post('/webhook', async (req, res) => {
         ? text
         : `${encuestaPendiente.survey_feedback || ''}\n${text}`.trim();
 
-      await supabase.from('appointments').update({
+      // Buscamos una calificación 1-10 en CADA mensaje que mande el cliente
+      // (por si la manda en un mensaje distinto al del comentario), y solo
+      // sobreescribimos survey_rating si encontramos una en este mensaje.
+      const ratingDetectado = extractRating(text);
+
+      const dbUpdates = {
         survey_feedback: feedbackAcumulado,
         survey_responded_at: new Date().toISOString(),
-      }).eq('id', encuestaPendiente.id);
+      };
+      if (ratingDetectado !== null) dbUpdates.survey_rating = ratingDetectado;
+
+      await supabase.from('appointments').update(dbUpdates).eq('id', encuestaPendiente.id);
 
       if (esPrimeraRespuesta) {
         const { client: clienteEncuesta } = await getClienteYCita(from);
