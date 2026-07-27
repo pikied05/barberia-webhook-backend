@@ -1561,9 +1561,14 @@ app.post('/webhook', async (req, res) => {
       const esHoy = state.fecha === nowMX.toISOString().slice(0, 10);
       const horaActual = esHoy ? nowMX.getHours() * 60 + nowMX.getMinutes() : null;
 
-      const { data: barberos } = await supabase.from('barbers').select('id, name').eq('active', true);
+      const dayName = DAY_MAP[new Date(`${state.fecha}T00:00:00`).getDay()];
+      const { data: barberos } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
+      const barberosDelDia = (barberos || []).filter(b => {
+        const schedule = Array.isArray(b.schedule) ? b.schedule : [];
+        return schedule.some(d => normalizarTexto(d) === normalizarTexto(dayName));
+      });
       const disponibles = [];
-      for (const b of (barberos || [])) {
+      for (const b of barberosDelDia) {
         const slotsLibres = await getSlotsLibres(b.id, state.fecha, horaActual);
         if (slotsLibres.includes(horaSolicitada)) disponibles.push(b);
       }
