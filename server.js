@@ -2360,7 +2360,7 @@ app.post('/webhook', async (req, res) => {
           reminder_sent: false,
           duration_minutes: servicio.duration || 60,
           end_time: endTime,
-          notes: `Agendado por WhatsApp. Servicio: ${servicio.name}`,
+          notes: `Agendado por WhatsApp. Servicio: ${state.serviceName || servicio.name}`,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         };
