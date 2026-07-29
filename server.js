@@ -1065,7 +1065,7 @@ async function confirmarHorarioPuntual(from, text, fechaDate, fechaLabel, state)
 
   // Duración: default 60 min. Solo si el cliente mencionó explícitamente el
   // servicio (ej. "barba") usamos su duración real — nunca se le pregunta.
-  const servicioMencionado = extraerServicioDelMensaje(text) || state?.serviceName || null;
+  const servicioMencionado = await extraerServicioDelMensaje(text) || state?.serviceName || null;
   const duracionDetectada = (await buscarDuracionServicio(servicioMencionado)) || 60;
 
   const disponibles = [];
@@ -1125,7 +1125,7 @@ async function confirmarHorarioPuntual(from, text, fechaDate, fechaLabel, state)
     return true;
   }
 
-  const servicioSolicitado = extraerServicioDelMensaje(text) || state?.serviceName || 'Corte Premium';
+  const servicioSolicitado = await extraerServicioDelMensaje(text) || state?.serviceName || 'Corte Premium';
   const digits10 = from.replace(/^52/, '').slice(-10);
 
   const nombreBuscado = normalizarTexto(text);
@@ -1332,7 +1332,7 @@ async function obtenerOCrearCliente(phone, name = null) {
 
 // ─── Función para extraer servicio del mensaje ──────────────────────────────
 
-function extraerServicioDelMensaje(text) {
+function extraerServicioDelMensajePorPalabrasClave(text) {
   const textoLower = normalizarTexto(text);
 
   // Combos específicos primero (más específico gana), luego servicios individuales.
@@ -1363,6 +1363,55 @@ function extraerServicioDelMensaje(text) {
     }
   }
   return null;
+}
+
+// Palabras demasiado genéricas como para identificar un servicio por sí solas.
+const SERVICE_STOPWORDS = new Set(['de', 'y', 'la', 'el', 'los', 'las', 'con', 'para', 'del', 'al']);
+
+function tokensSignificativos(nombre) {
+  return normalizarTexto(nombre)
+    .split(/\s+/)
+    .filter(w => w.length >= 3 && !SERVICE_STOPWORDS.has(w));
+}
+
+// Busca coincidencia contra los servicios REALES y activos en Supabase, para
+// que cualquier servicio que se dé de alta ahí (ej. "Corte Infantil") se
+// reconozca automáticamente sin tener que tocar código cada vez.
+// Elige el servicio cuyo nombre tiene más palabras coincidentes con el
+// mensaje del cliente (y, en empate, el de mayor proporción de coincidencia,
+// para preferir nombres más específicos sobre genéricos).
+async function extraerServicioDelMensajeDB(text) {
+  const textoNorm = normalizarTexto(text);
+  const { data: servicios, error } = await supabase.from('services').select('name').eq('active', true);
+  if (error || !servicios?.length) return null;
+
+  let mejorNombre = null;
+  let mejorMatched = 0;
+  let mejorRatio = 0;
+
+  for (const s of servicios) {
+    const tokens = tokensSignificativos(s.name);
+    if (!tokens.length) continue;
+    const matched = tokens.filter(t => textoNorm.includes(t)).length;
+    if (matched === 0) continue;
+    const ratio = matched / tokens.length;
+    if (matched > mejorMatched || (matched === mejorMatched && ratio > mejorRatio)) {
+      mejorNombre = s.name;
+      mejorMatched = matched;
+      mejorRatio = ratio;
+    }
+  }
+  return mejorNombre;
+}
+
+// Punto de entrada usado en todo el flujo de agendado: primero intenta
+// reconocer el servicio contra el catálogo real de Supabase (para que
+// cualquier servicio nuevo se detecte solo), y si no encuentra nada usa las
+// palabras clave genéricas como respaldo.
+async function extraerServicioDelMensaje(text) {
+  const porCatalogo = await extraerServicioDelMensajeDB(text);
+  if (porCatalogo) return porCatalogo;
+  return extraerServicioDelMensajePorPalabrasClave(text);
 }
 
 app.post('/webhook', async (req, res) => {
@@ -1481,7 +1530,7 @@ app.post('/webhook', async (req, res) => {
 
     // ── Paso de servicio para agendar (antes de mostrar disponibilidad) ─────
     if (state?.step === 'esperando_servicio') {
-      const servicioSolicitado = extraerServicioDelMensaje(text) || state?.serviceName || null;
+      const servicioSolicitado = await extraerServicioDelMensaje(text) || state?.serviceName || null;
       if (!servicioSolicitado) {
         await chakraSendSession(from, `No entendí el servicio 😅\nDi algo como *corte*, *barba*, *corte y barba*, *afeitado* o *tinte*.`);
         return;
@@ -1781,7 +1830,7 @@ app.post('/webhook', async (req, res) => {
               if (slotsLibres.includes(horaSolicitada)) disponiblesLaHora.push(barbero);
             }
 
-            const servicioSolicitado = extraerServicioDelMensaje(text);
+            const servicioSolicitado = await extraerServicioDelMensaje(text);
             const digits10 = from.replace(/^52/, '').slice(-10);
 
             if (disponiblesLaHora.length >= 1) {
@@ -1874,7 +1923,7 @@ app.post('/webhook', async (req, res) => {
         }
       }
 
-      const servicioSolicitado = extraerServicioDelMensaje(text) || state?.serviceName || null;
+      const servicioSolicitado = await extraerServicioDelMensaje(text) || state?.serviceName || null;
       const duracionDetectada = (await buscarDuracionServicio(servicioSolicitado)) || 60;
 
       const { data: barberos } = await supabase.from('barbers').select('id, name').eq('active', true);
@@ -1972,7 +2021,7 @@ app.post('/webhook', async (req, res) => {
           return;
         }
         
-        const servicioSolicitado = extraerServicioDelMensaje(text) || state.serviceName || 'Corte Premium';
+        const servicioSolicitado = await extraerServicioDelMensaje(text) || state.serviceName || 'Corte Premium';
         const digits10 = from.replace(/^52/, '').slice(-10);
         
         conversationState[from] = {
@@ -2068,7 +2117,7 @@ app.post('/webhook', async (req, res) => {
           return;
         }
 
-        const servicioSolicitado = extraerServicioDelMensaje(text) || state.serviceName || 'Corte Premium';
+        const servicioSolicitado = await extraerServicioDelMensaje(text) || state.serviceName || 'Corte Premium';
 
         const nombreBuscado = normalizarTexto(matchNombreHora.nombre);
         const { data: barberos } = await supabase.from('barbers').select('id, name').eq('active', true);
@@ -2143,7 +2192,7 @@ app.post('/webhook', async (req, res) => {
             return;
           }
 
-          const servicioSolicitado = extraerServicioDelMensaje(text) || state.serviceName || 'Corte Premium';
+          const servicioSolicitado = await extraerServicioDelMensaje(text) || state.serviceName || 'Corte Premium';
           const digits10 = from.replace(/^52/, '').slice(-10);
 
           conversationState[from] = {
@@ -2213,7 +2262,7 @@ app.post('/webhook', async (req, res) => {
           return;
         }
 
-        const servicioSolicitado = extraerServicioDelMensaje(text) || state.serviceName || 'Corte Premium';
+        const servicioSolicitado = await extraerServicioDelMensaje(text) || state.serviceName || 'Corte Premium';
         const barberoAsignado = disponibles[Math.floor(Math.random() * disponibles.length)];
         const digits10 = from.replace(/^52/, '').slice(-10);
 
@@ -2516,7 +2565,7 @@ app.post('/webhook', async (req, res) => {
     // ── Si está esperando confirmación de si quiere cita ─────────────────────
     if (state?.step === 'esperando_confirmacion_cita') {
       const fechaPedida = parsearFechaPedida(text);
-      const servicioSolicitado = extraerServicioDelMensaje(text) || state?.serviceName || null;
+      const servicioSolicitado = await extraerServicioDelMensaje(text) || state?.serviceName || null;
 
       if (fechaPedida) {
         await mostrarDisponibilidadEnFecha(from, fechaPedida, '¡Perfecto!', servicioSolicitado || state?.serviceName || null);
@@ -2565,7 +2614,7 @@ app.post('/webhook', async (req, res) => {
       const mensajePrecios = await buildPreciosMsg(false);
       await chakraSendSession(from, mensajePrecios);
 
-      const servicioSolicitado = extraerServicioDelMensaje(text) || state?.serviceName || null;
+      const servicioSolicitado = await extraerServicioDelMensaje(text) || state?.serviceName || null;
       if (!servicioSolicitado) {
         await preguntarPorServicio(from, state);
         return;
@@ -2584,7 +2633,7 @@ app.post('/webhook', async (req, res) => {
 
     // ── Quiere agendar directamente ───────────────────────────────────────────
     if (esAgendar) {
-      const servicioSolicitado = extraerServicioDelMensaje(text) || state?.serviceName || null;
+      const servicioSolicitado = await extraerServicioDelMensaje(text) || state?.serviceName || null;
       if (!servicioSolicitado) {
         await preguntarPorServicio(from, state);
         return;
