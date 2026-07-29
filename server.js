@@ -1339,8 +1339,8 @@ function extraerServicioDelMensaje(text) {
   // El nombre de la izquierda es lo que se busca en el texto; el de la derecha es
   // el nombre canónico que se guarda/muestra.
   const candidatos = [
-    { patron: /corte\s*y\s*barba|barba\s*y\s*corte/, nombre: 'Corte y Barba' },
-    { patron: /corte\s*(de\s*)?barba/, nombre: 'Corte y Barba' }, // "corte de barba" = quiere ambos
+    { patron: /corte\s*y\s*barba|barba\s*y\s*corte/, nombre: 'Corte y Barba Imperial' },
+    { patron: /corte\s*(de\s*)?barba/, nombre: 'Corte y Barba Imperial' }, // "corte de barba" = quiere ambos
     { patron: /\bbarba\b/, nombre: 'Barba' },
     { patron: /\bafeitado\b/, nombre: 'Afeitado' },
     { patron: /\btinte\b/, nombre: 'Tinte' },
@@ -1493,9 +1493,10 @@ app.post('/webhook', async (req, res) => {
 
       conversationState[from] = { ...state, step: 'esperando_confirmacion_cita', serviceName: servicioFinal };
       const fechaMencionada = parsearFechaPedida(text);
+      const fechaParaHora = fechaMencionada || new Date(Date.now() - 6 * 60 * 60 * 1000);
+      const yaAtendido = await confirmarHorarioPuntual(from, text, fechaParaHora, formatDateMX(fechaParaHora), { ...state, serviceName: servicioFinal });
+      if (yaAtendido) return;
       if (fechaMencionada) {
-        const yaAtendido = await confirmarHorarioPuntual(from, text, fechaMencionada, formatDateMX(fechaMencionada), { ...state, serviceName: servicioFinal });
-        if (yaAtendido) return;
         await mostrarDisponibilidadEnFecha(from, fechaMencionada, '¡Perfecto!', servicioFinal);
         return;
       }
@@ -2302,6 +2303,26 @@ app.post('/webhook', async (req, res) => {
         // ── Paso 2: Obtener o crear el servicio ─────────────────────────────
         const servicio = await obtenerOCrearServicio(state.serviceName || 'Corte Premium');
 
+        // Si el servicio que se guardó en el catálogo no corresponde a lo que
+        // el cliente pidió (ej. pidió "Corte y Barba" pero no existe ese
+        // servicio en Supabase y cayó al genérico "Corte Premium"), avisamos
+        // al staff para que lo den de alta con su precio/duración correctos.
+        if (
+          servicio &&
+          state.serviceName &&
+          normalizarTexto(servicio.name) !== normalizarTexto(state.serviceName) &&
+          !normalizarTexto(servicio.name).includes(normalizarTexto(state.serviceName)) &&
+          !normalizarTexto(state.serviceName).includes(normalizarTexto(servicio.name))
+        ) {
+          console.warn(`⚠️ Servicio "${state.serviceName}" no encontrado en catálogo, se usó "${servicio.name}" como sustituto.`);
+          alertarEquipoManual({
+            cliente: `${state.clientName || digits10}`,
+            fechaHora: `${state.fecha} ${state.hora}`,
+            barbero: state.barberoName,
+            detalle: `El cliente pidió el servicio "${state.serviceName}", pero no existe en el catálogo de Supabase. Se usó "${servicio.name}" solo para el precio/duración — por favor da de alta "${state.serviceName}" con su precio correcto.`,
+          }).catch(() => {});
+        }
+
         if (!servicio) {
           await chakraSendSession(from, `¡Gracias! 🙌 Ya casi tenemos lista tu cita — en un momento el equipo te la confirma personalmente.`);
           await alertarEquipoManual({
@@ -2330,7 +2351,7 @@ app.post('/webhook', async (req, res) => {
           barber_id: state.barberoId,
           barber_name: state.barberoName,
           service_id: servicio.id,
-          service_name: servicio.name,
+          service_name: state.serviceName || servicio.name,
           date: state.fecha,
           time: state.hora,
           status: 'pendiente',
@@ -2504,6 +2525,14 @@ app.post('/webhook', async (req, res) => {
           await preguntarPorServicio(from, state);
           return;
         }
+
+        // Si el cliente ya mandó una hora puntual (con o sin barbero) en este
+        // mismo mensaje, intentamos confirmar directo en vez de mostrarle
+        // toda la lista de horarios de nuevo.
+        const fechaParaHora = new Date(Date.now() - 6 * 60 * 60 * 1000);
+        const yaAtendido = await confirmarHorarioPuntual(from, text, fechaParaHora, formatDateMX(fechaParaHora), { ...state, serviceName: servicioSolicitado });
+        if (yaAtendido) return;
+
         await prepararFechaYGuardarState(from, servicioSolicitado);
         const disponibilidadMsg = await buildDisponibilidadMsg(servicioSolicitado);
         await chakraSendSession(from, `¡Perfecto! 💈 Aquí tienes los horarios disponibles para *${servicioSolicitado}*:\n\n${disponibilidadMsg}`);
