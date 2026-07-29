@@ -372,12 +372,21 @@ async function buildPreciosMsg(includeCTA = true) {
   return mensajePrecios;
 }
 
-async function buildDisponibilidadMsg() {
+async function preguntarPorServicio(from, state = null) {
+  conversationState[from] = { ...(state || {}), step: 'esperando_servicio' };
+  await chakraSendSession(from,
+    `Para poder agendarte bien, necesito saber qué servicio quieres.\n\n` +
+    `Di algo como: *corte*, *barba*, *corte y barba*, *afeitado* o *tinte*.`
+  );
+}
+
+async function buildDisponibilidadMsg(serviceName = null) {
   const { data: barberos } = await supabase
     .from('barbers').select('id, name, schedule').eq('active', true);
 
   if (!barberos?.length) return '😔 No hay barberos disponibles en este momento.';
 
+  const duracionMinutos = (await buscarDuracionServicio(serviceName)) || 60;
   const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
   const todayStr = nowMX.toISOString().slice(0, 10);
   const dayName  = DAY_MAP[nowMX.getDay()];
@@ -420,7 +429,7 @@ async function buildDisponibilidadMsg() {
   const esHoy = dateStrFinal === todayStr;
 
   for (const barbero of barberosFinales) {
-    let slots = await getSlotsLibres(barbero.id, dateStrFinal, esHoy ? horaActual : null);
+    const slots = await getSlotsLibres(barbero.id, dateStrFinal, esHoy ? horaActual : null, duracionMinutos);
     if (!slots.length) continue;
 
     const seleccionados = splitSlots(slots);
@@ -432,7 +441,6 @@ async function buildDisponibilidadMsg() {
   }
 
   if (!hayDisponibilidad) {
-    // ✅ Sin slots → buscar siguiente día disponible automáticamente
     const nextDaysList = getNextDays(7);
     for (const day of nextDaysList) {
       const dn = DAY_MAP[day.getDay()];
@@ -447,7 +455,7 @@ async function buildDisponibilidadMsg() {
       let msgFallback = `✂️ *Horarios disponibles — ${formatDateMX(day)}:*\n\n`;
       let haySlots = false;
       for (const barbero of barberosDay) {
-        const slots = await getSlotsLibres(barbero.id, dateStrDay, null);
+        const slots = await getSlotsLibres(barbero.id, dateStrDay, null, duracionMinutos);
         const sel = splitSlots(slots);
         if (!sel.length) continue;
         haySlots = true;
@@ -890,7 +898,7 @@ function parsearFechaPedida(txt) {
   return null;
 }
 
-async function mostrarDisponibilidadEnFecha(from, fechaDate, prefijo = '¡Perfecto! 💈') {
+async function mostrarDisponibilidadEnFecha(from, fechaDate, prefijo = '¡Perfecto! 💈', serviceName = null) {
   const { data: barberos } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
   const dateStr  = toYMD(fechaDate);
   const dayName  = DAY_MAP[fechaDate.getDay()];
@@ -898,6 +906,7 @@ async function mostrarDisponibilidadEnFecha(from, fechaDate, prefijo = '¡Perfec
   const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
   const esHoy = dateStr === nowMX.toISOString().slice(0, 10);
   const horaActual = esHoy ? nowMX.getHours() * 60 + nowMX.getMinutes() : null;
+  const duracionMinutos = (await buscarDuracionServicio(serviceName)) || 60;
 
   const barberosDelDia = (barberos || []).filter(b => {
     const schedule = Array.isArray(b.schedule) ? b.schedule : [];
@@ -908,7 +917,7 @@ async function mostrarDisponibilidadEnFecha(from, fechaDate, prefijo = '¡Perfec
   let msgSlots = `✂️ *Horarios disponibles — ${label}:*\n\n`;
 
   for (const b of barberosDelDia) {
-    const slots = await getSlotsLibres(b.id, dateStr, horaActual);
+    const slots = await getSlotsLibres(b.id, dateStr, horaActual, duracionMinutos);
     const seleccionados = splitSlots(slots);
     if (!seleccionados.length) continue;
     haySlots = true;
@@ -931,7 +940,7 @@ async function mostrarDisponibilidadEnFecha(from, fechaDate, prefijo = '¡Perfec
       });
       let tieneSlotsLibres = false;
       for (const b of barberosDay) {
-        const s = await getSlotsLibres(b.id, toYMD(day), null);
+        const s = await getSlotsLibres(b.id, toYMD(day), null, duracionMinutos);
         if (s.length) { tieneSlotsLibres = true; break; }
       }
       if (tieneSlotsLibres) { fallbackDate = day; fallbackLabel = formatDateMX(day); break; }
@@ -951,7 +960,7 @@ async function mostrarDisponibilidadEnFecha(from, fechaDate, prefijo = '¡Perfec
       return schedule.some(d => normalizarTexto(d) === normalizarTexto(fallbackDayName));
     });
     for (const b of barberosF) {
-      const slots = await getSlotsLibres(b.id, fallbackStr, null);
+      const slots = await getSlotsLibres(b.id, fallbackStr, null, duracionMinutos);
       const seleccionados = splitSlots(slots);
       if (!seleccionados.length) continue;
       msgFallback += `👤 *${b.name}:* ${seleccionados.join(' · ')}\n`;
@@ -961,7 +970,13 @@ async function mostrarDisponibilidadEnFecha(from, fechaDate, prefijo = '¡Perfec
 Ej: _Giovanni 15:00_
 
 💡 ¿No conoces a los barberos? Solo manda la *hora* y nosotros te asignamos uno disponible.`;
-    conversationState[from] = { step: 'esperando_seleccion', fecha: fallbackStr, fechaLabel: fallbackLabel };
+    conversationState[from] = {
+      ...(conversationState[from] || {}),
+      step: 'esperando_seleccion',
+      fecha: fallbackStr,
+      fechaLabel: fallbackLabel,
+      serviceName: conversationState[from]?.serviceName || null,
+    };
     await chakraSendSession(from, msgFallback);
     return;
   }
@@ -972,7 +987,13 @@ Ej: _Giovanni 15:00_
 
 💡 ¿No conoces a los barberos? Solo manda la *hora* y nosotros te asignamos uno disponible.
 Ej: _15:00_ o _3 pm_`;
-  conversationState[from] = { step: 'esperando_seleccion', fecha: dateStr, fechaLabel: label };
+  conversationState[from] = {
+    ...(conversationState[from] || {}),
+    step: 'esperando_seleccion',
+    fecha: dateStr,
+    fechaLabel: label,
+    serviceName: conversationState[from]?.serviceName || null,
+  };
   await chakraSendSession(from, `${prefijo} Aquí tienes los horarios disponibles:\n\n${msgSlots}`);
 }
 
@@ -1058,7 +1079,12 @@ async function confirmarHorarioPuntual(from, text, fechaDate, fechaLabel, state)
   if (barberoNombrado && !disponibles.some(b => b.id === barberoNombrado.id)) {
     const slotsDeEse = await getSlotsLibres(barberoNombrado.id, dateStr, esHoy ? horaActual : null, duracionDetectada);
     if (!slotsDeEse.length) {
-      conversationState[from] = { step: 'esperando_hora_especifica', fecha: dateStr, fechaLabel };
+      conversationState[from] = {
+        ...(conversationState[from] || {}),
+        step: 'esperando_hora_especifica',
+        fecha: dateStr,
+        fechaLabel,
+      };
       await chakraSendSession(from,
         `😔 *${barberoNombrado.name}* no tiene horarios libres el *${fechaLabel}*.\n¿Quieres otro día, o que te asigne otro barbero disponible?`
       );
@@ -1076,8 +1102,12 @@ async function confirmarHorarioPuntual(from, text, fechaDate, fechaLabel, state)
       .sort();
 
     conversationState[from] = {
-      step: 'esperando_hora_especifica', fecha: dateStr, fechaLabel,
-      barberoPreferidoId: barberoNombrado.id, barberoPreferidoName: barberoNombrado.name,
+      ...(conversationState[from] || {}),
+      step: 'esperando_hora_especifica',
+      fecha: dateStr,
+      fechaLabel,
+      barberoPreferidoId: barberoNombrado.id,
+      barberoPreferidoName: barberoNombrado.name,
     };
     await chakraSendSession(from,
       `😔 *${barberoNombrado.name}* no está libre a las *${horaSolicitada}*, ya tiene una cita a esa hora.\n\n` +
@@ -1117,7 +1147,7 @@ async function confirmarHorarioPuntual(from, text, fechaDate, fechaLabel, state)
   return true;
 }
 
-async function prepararFechaYGuardarState(from) {
+async function prepararFechaYGuardarState(from, serviceName = null) {
   const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
   const todayDayName = DAY_MAP[nowMX.getDay()];
   const { data: barberos } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
@@ -1139,7 +1169,8 @@ async function prepararFechaYGuardarState(from) {
     let haySlots = false;
     const horaActual = nowMX.getHours() * 60 + nowMX.getMinutes();
     for (const b of barberosHoy) {
-      const slots = await getSlotsLibres(b.id, todayStr, horaActual);
+      const duracionMinutos = (await buscarDuracionServicio(serviceName)) || 60;
+      const slots = await getSlotsLibres(b.id, todayStr, horaActual, duracionMinutos);
       if (slots.length) { haySlots = true; break; }
     }
     if (haySlots) { primerDia = todayStr; primerDiaLabel = formatDateMX(nowMX); }
@@ -1159,7 +1190,7 @@ async function prepararFechaYGuardarState(from) {
   }
 
   if (primerDia) {
-    conversationState[from] = { step: 'esperando_seleccion', fecha: primerDia, fechaLabel: primerDiaLabel };
+    conversationState[from] = { step: 'esperando_seleccion', fecha: primerDia, fechaLabel: primerDiaLabel, serviceName };
   }
   return { primerDia, primerDiaLabel };
 }
@@ -1444,6 +1475,31 @@ app.post('/webhook', async (req, res) => {
       delete conversationState[from];
       const { client } = await getClienteYCita(from);
       await chakraSendSession(from, `Ok ${client?.name?.split(' ')[0] || 'amigo'}, cancelé el proceso. Escríbeme *hola* cuando quieras agendar. 👍`);
+      return;
+    }
+
+    // ── Paso de servicio para agendar (antes de mostrar disponibilidad) ─────
+    if (state?.step === 'esperando_servicio') {
+      const servicioSolicitado = extraerServicioDelMensaje(text) || state?.serviceName || null;
+      if (!servicioSolicitado) {
+        await chakraSendSession(from, `No entendí el servicio 😅\nDi algo como *corte*, *barba*, *corte y barba*, *afeitado* o *tinte*.`);
+        return;
+      }
+
+      const servicioFinal = servicioSolicitado === 'cualquiera' || servicioSolicitado === 'cualquier servicio'
+        ? 'Corte Premium'
+        : servicioSolicitado;
+
+      conversationState[from] = { ...state, step: 'esperando_confirmacion_cita', serviceName: servicioFinal };
+      const fechaMencionada = parsearFechaPedida(text);
+      if (fechaMencionada) {
+        const yaAtendido = await confirmarHorarioPuntual(from, text, fechaMencionada, formatDateMX(fechaMencionada), { ...state, serviceName: servicioFinal });
+        if (yaAtendido) return;
+        await mostrarDisponibilidadEnFecha(from, fechaMencionada, '¡Perfecto!', servicioFinal);
+        return;
+      }
+      const disponibilidadMsg = await buildDisponibilidadMsg(servicioFinal);
+      await chakraSendSession(from, `Perfecto, voy a revisar la disponibilidad para *${servicioFinal}*:\n\n${disponibilidadMsg}`);
       return;
     }
 
@@ -2438,13 +2494,18 @@ app.post('/webhook', async (req, res) => {
     // ── Si está esperando confirmación de si quiere cita ─────────────────────
     if (state?.step === 'esperando_confirmacion_cita') {
       const fechaPedida = parsearFechaPedida(text);
+      const servicioSolicitado = extraerServicioDelMensaje(text) || state?.serviceName || null;
 
       if (fechaPedida) {
-        await mostrarDisponibilidadEnFecha(from, fechaPedida, '¡Perfecto!');
+        await mostrarDisponibilidadEnFecha(from, fechaPedida, '¡Perfecto!', servicioSolicitado || state?.serviceName || null);
       } else if (quiereCita || esAgendar) {
-        await prepararFechaYGuardarState(from);
-        const disponibilidadMsg = await buildDisponibilidadMsg();
-        await chakraSendSession(from, `¡Perfecto! 💈 Aquí tienes los horarios disponibles:\n\n${disponibilidadMsg}`);
+        if (!servicioSolicitado) {
+          await preguntarPorServicio(from, state);
+          return;
+        }
+        await prepararFechaYGuardarState(from, servicioSolicitado);
+        const disponibilidadMsg = await buildDisponibilidadMsg(servicioSolicitado);
+        await chakraSendSession(from, `¡Perfecto! 💈 Aquí tienes los horarios disponibles para *${servicioSolicitado}*:\n\n${disponibilidadMsg}`);
       } else {
         delete conversationState[from];
         await chakraSendSession(from, `¡Claro! Si en algún momento deseas vivir la experiencia IMPERIUM, aquí estaremos. 🫡`);
@@ -2470,33 +2531,38 @@ app.post('/webhook', async (req, res) => {
       const mensajePrecios = await buildPreciosMsg(false);
       await chakraSendSession(from, mensajePrecios);
 
-      // Si ya mencionó una hora puntual (ej. "quiero precios y agendar a las 15:00"),
-      // revisar esa hora en vez de solo mostrar la disponibilidad genérica.
+      const servicioSolicitado = extraerServicioDelMensaje(text) || state?.serviceName || null;
+      if (!servicioSolicitado) {
+        await preguntarPorServicio(from, state);
+        return;
+      }
+
       const fechaMencionadaPrecio = parsearFechaPedida(text);
       const fechaParaHoraPrecio = fechaMencionadaPrecio || new Date(Date.now() - 6 * 60 * 60 * 1000);
-      const yaAtendidoPrecio = await confirmarHorarioPuntual(from, text, fechaParaHoraPrecio, formatDateMX(fechaParaHoraPrecio), null);
+      const yaAtendidoPrecio = await confirmarHorarioPuntual(from, text, fechaParaHoraPrecio, formatDateMX(fechaParaHoraPrecio), { ...state, serviceName: servicioSolicitado });
       if (yaAtendidoPrecio) return;
 
-      await prepararFechaYGuardarState(from);
-      const disponibilidadMsg = await buildDisponibilidadMsg();
-      await chakraSendSession(from, `¿Te reservo un espacio? Aquí tienes los horarios disponibles:\n\n${disponibilidadMsg}`);
+      await prepararFechaYGuardarState(from, servicioSolicitado);
+      const disponibilidadMsg = await buildDisponibilidadMsg(servicioSolicitado);
+      await chakraSendSession(from, `¿Te reservo un espacio? Aquí tienes los horarios disponibles para *${servicioSolicitado}*:\n\n${disponibilidadMsg}`);
       return;
     }
 
     // ── Quiere agendar directamente ───────────────────────────────────────────
     if (esAgendar) {
-      // Si el mensaje ya trae una hora puntual (ej. "¿Tendrán espacio a las 15:00?"),
-      // revisar esa hora exacta (en la fecha mencionada, o "hoy" si no mencionó fecha)
-      // en vez de saltar directo a mostrar la disponibilidad genérica del primer día
-      // con espacio — eso era lo que causaba que se ofreciera "mañana" aunque hoy sí
-      // hubiera hueco a esa hora.
+      const servicioSolicitado = extraerServicioDelMensaje(text) || state?.serviceName || null;
+      if (!servicioSolicitado) {
+        await preguntarPorServicio(from, state);
+        return;
+      }
+
       const fechaMencionada = parsearFechaPedida(text);
       const fechaParaHora = fechaMencionada || new Date(Date.now() - 6 * 60 * 60 * 1000);
-      const yaAtendido = await confirmarHorarioPuntual(from, text, fechaParaHora, formatDateMX(fechaParaHora), null);
+      const yaAtendido = await confirmarHorarioPuntual(from, text, fechaParaHora, formatDateMX(fechaParaHora), { ...state, serviceName: servicioSolicitado });
       if (yaAtendido) return;
 
-      await prepararFechaYGuardarState(from);
-      const disponibilidadMsg = await buildDisponibilidadMsg();
+      await prepararFechaYGuardarState(from, servicioSolicitado);
+      const disponibilidadMsg = await buildDisponibilidadMsg(servicioSolicitado);
       await chakraSendSession(from, `¡Hola! 👋 Bienvenido a *Imperium Caesar's Barber Club* 💈\n\n${disponibilidadMsg}`);
       return;
     }
