@@ -2576,7 +2576,10 @@ app.post('/webhook', async (req, res) => {
       const servicioSolicitado = await extraerServicioDelMensaje(text) || state?.serviceName || null;
 
       if (fechaPedida) {
-        await mostrarDisponibilidadEnFecha(from, fechaPedida, '¡Perfecto!', servicioSolicitado || state?.serviceName || null);
+        const servicioParaFecha = servicioSolicitado || state?.serviceName || null;
+        const yaAtendidoFecha = await confirmarHorarioPuntual(from, text, fechaPedida, formatDateMX(fechaPedida), { ...state, serviceName: servicioParaFecha });
+        if (yaAtendidoFecha) return;
+        await mostrarDisponibilidadEnFecha(from, fechaPedida, '¡Perfecto!', servicioParaFecha);
       } else if (quiereCita || esAgendar) {
         if (!servicioSolicitado) {
           await preguntarPorServicio(from, state);
