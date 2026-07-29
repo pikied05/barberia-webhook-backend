@@ -376,7 +376,8 @@ async function preguntarPorServicio(from, state = null) {
   conversationState[from] = { ...(state || {}), step: 'esperando_servicio' };
   await chakraSendSession(from,
     `Para poder agendarte bien, necesito saber qué servicio quieres.\n\n` +
-    `Di algo como: *corte*, *barba*, *corte y barba*, *afeitado* o *tinte*.`
+    `Di algo como: *corte*, *barba*, *corte y barba*, *afeitado* o *tinte*.\n\n` +
+    `Después solo dime la *hora* y el *barbero* (si no conoces a ninguno, te asignamos uno disponible 👌).`
   );
 }
 
@@ -2519,7 +2520,11 @@ app.post('/webhook', async (req, res) => {
       await chakraSendSession(from,
         `¡Hola! Gracias por contactar a *IMPERIUM CAESARS Barber Club*. 💈\n\n` +
         `Te ayudamos a proyectar una mejor imagen a través de una experiencia de cuidado personal diseñada para caballeros, que incluye *asesoría de imagen*, *lavado de cabello*, *bebida de cortesía* y nuestras exclusivas *Manos del Emperador*.\n\n` +
-        `¿Te reservo algún espacio para vivir la experiencia IMPERIUM?`
+        `¿Te reservo algún espacio para vivir la experiencia IMPERIUM? 💈\n\n` +
+        `Solo dime:\n` +
+        `1️⃣ *Servicio* (corte, barba, corte y barba, afeitado, tinte)\n` +
+        `2️⃣ *Hora* que prefieras\n` +
+        `3️⃣ *Barbero* de tu preferencia (si no conoces a ninguno, no te preocupes, te asignamos uno disponible 👌)`
       );
       return;
     }
