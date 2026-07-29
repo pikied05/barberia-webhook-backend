@@ -2484,7 +2484,15 @@ app.post('/webhook', async (req, res) => {
     }
 
     // ── Pregunta: ¿hacen corte para niños? ──────────────────────────────────
-    const esPreguntaCorteNino = [
+    // Solo debe disparar esta FAQ si es una pregunta suelta: si el cliente ya
+    // está en medio de un flujo de agendado (state activo) o su mensaje trae
+    // hora/fecha, es que está pidiendo el servicio "Corte Infantil", no
+    // preguntando si existe — en ese caso debe seguir el flujo de agendado.
+    const pareceHoraOFecha = /\d{1,2}(:\d{2})?\s*(am|pm|a\.?m\.?|p\.?m\.?|hrs?|horas?)\b/i.test(text)
+      || /\b\d{1,2}:\d{2}\b/.test(text)
+      || !!parsearFechaPedida(text);
+
+    const esPreguntaCorteNino = !state && !pareceHoraOFecha && [
       'corte de niño', 'corte para niño', 'corte niño', 'cortas pelo para un niño',
       'cortan pelo a niños', 'corte de niña', 'corte para niña', 'cortes infantiles',
       'corte infantil', 'para niños', 'niños cortan', 'hacen cortes a niños',
