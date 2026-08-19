@@ -208,7 +208,7 @@ const WEEKEND_SLOTS = [
 
 function esFinDeSemana(fechaODateStr) {
   const d = fechaODateStr instanceof Date ? fechaODateStr : new Date(`${fechaODateStr}T12:00:00`);
-  const dia = d.getDay();
+  const dia = d.getUTCDay();
   return dia === 0 || dia === 6; // Domingo o Sábado
 }
 
@@ -234,12 +234,12 @@ const DAY_MAP = { 0: 'Dom', 1: 'Lun', 2: 'Mar', 3: 'Mié', 4: 'Jue', 5: 'Vie', 6
 function getNextDays(n = 5) {
   const days = [];
   const today = new Date();
-  today.setHours(today.getHours() - 6);
+  today.setUTCHours(today.getUTCHours() - 6);
   let count = 0, offset = 0;
   while (count < n) {
     offset++;
     const d = new Date(today);
-    d.setDate(today.getDate() + offset);
+    d.setUTCDate(today.getUTCDate() + offset);
     days.push(d);
     count++;
   }
@@ -249,7 +249,7 @@ function getNextDays(n = 5) {
 function formatDateMX(date) {
   const days   = ['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
   const months = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
-  return `${days[date.getDay()]} ${date.getDate()} ${months[date.getMonth()]}`;
+  return `${days[date.getUTCDay()]} ${date.getUTCDate()} ${months[date.getUTCMonth()]}`;
 }
 
 function toYMD(date) {
@@ -390,8 +390,8 @@ async function buildDisponibilidadMsg(serviceName = null) {
   const duracionMinutos = (await buscarDuracionServicio(serviceName)) || 60;
   const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
   const todayStr = nowMX.toISOString().slice(0, 10);
-  const dayName  = DAY_MAP[nowMX.getDay()];
-  const horaActual = nowMX.getHours() * 60 + nowMX.getMinutes();
+  const dayName  = DAY_MAP[nowMX.getUTCDay()];
+  const horaActual = nowMX.getUTCHours() * 60 + nowMX.getUTCMinutes();
 
   const barberosHoy = barberos.filter(b => {
     const schedule = Array.isArray(b.schedule) ? b.schedule : [];
@@ -407,7 +407,7 @@ async function buildDisponibilidadMsg(serviceName = null) {
   if (!barberosHoy.length) {
     const nextDays = getNextDays(4);
     for (const day of nextDays) {
-      const dn = DAY_MAP[day.getDay()];
+      const dn = DAY_MAP[day.getUTCDay()];
       const tieneBarbe = barberos.some(b => {
         const schedule = Array.isArray(b.schedule) ? b.schedule : [];
         return schedule.some(d => d.replace('á','a').replace('é','e') === dn.replace('á','a').replace('é','e'));
@@ -444,7 +444,7 @@ async function buildDisponibilidadMsg(serviceName = null) {
   if (!hayDisponibilidad) {
     const nextDaysList = getNextDays(7);
     for (const day of nextDaysList) {
-      const dn = DAY_MAP[day.getDay()];
+      const dn = DAY_MAP[day.getUTCDay()];
       const barberosDay = barberos.filter(b => {
         const schedule = Array.isArray(b.schedule) ? b.schedule : [];
         return schedule.some(d =>
@@ -586,7 +586,7 @@ async function getCitaCanceladaReciente(from) {
   if (!client) return { client: null, cita: null };
 
   const ayer = new Date();
-  ayer.setDate(ayer.getDate() - 1);
+  ayer.setUTCDate(ayer.getUTCDate() - 1);
   const ayerStr = ayer.toISOString().slice(0, 10);
 
   const { data: citaRows } = await supabase
@@ -604,7 +604,7 @@ async function getCitaCanceladaReciente(from) {
 async function getEncuestaPendiente(from) {
   const digits10 = from.replace(/^52/, '').slice(-10);
   const limiteFecha = new Date();
-  limiteFecha.setDate(limiteFecha.getDate() - 3);
+  limiteFecha.setUTCDate(limiteFecha.getUTCDate() - 3);
   const { data } = await supabase
     .from('appointments')
     .select('id, date, survey_feedback, survey_responded_at')
@@ -767,7 +767,7 @@ app.post('/reenganche-sent', async (req, res) => {
 app.get('/reenganche-status', async (req, res) => {
   const { blockDays = 30 } = req.query;
   const since = new Date();
-  since.setDate(since.getDate() - Number(blockDays));
+  since.setUTCDate(since.getUTCDate() - Number(blockDays));
 
   const { data, error } = await supabase
     .from('clients')
@@ -813,7 +813,7 @@ app.post('/imperium-sent', async (req, res) => {
 app.get('/imperium-status', async (req, res) => {
   const { blockDays = 30 } = req.query;
   const since = new Date();
-  since.setDate(since.getDate() - Number(blockDays));
+  since.setUTCDate(since.getUTCDate() - Number(blockDays));
 
   const { data, error } = await supabase
     .from('clients')
@@ -854,10 +854,10 @@ function parsearFechaPedida(txt) {
   const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
 
   if (t.includes('pasado')) {
-    const d = new Date(nowMX); d.setDate(d.getDate() + 2); return d;
+    const d = new Date(nowMX); d.setUTCDate(d.getUTCDate() + 2); return d;
   }
   if (t.includes('manana') || t.includes('mañana')) {
-    const d = new Date(nowMX); d.setDate(d.getDate() + 1); return d;
+    const d = new Date(nowMX); d.setUTCDate(d.getUTCDate() + 1); return d;
   }
   if (t.includes('hoy')) {
     return new Date(nowMX);
@@ -876,11 +876,11 @@ function parsearFechaPedida(txt) {
   for (const { palabras, idx } of diasMap) {
     if (palabras.some(p => t.includes(p))) {
       const d = new Date(nowMX);
-      let diff = idx - d.getDay();
+      let diff = idx - d.getUTCDay();
       // Si el día pedido es el mismo que hoy, se interpreta como "hoy",
       // no como el mismo día de la próxima semana.
       if (diff < 0) diff += 7;
-      d.setDate(d.getDate() + diff);
+      d.setUTCDate(d.getUTCDate() + diff);
       return d;
     }
   }
@@ -890,8 +890,8 @@ function parsearFechaPedida(txt) {
     const dia = parseInt(numMatch[1], 10);
     if (dia >= 1 && dia <= 31) {
       const d = new Date(nowMX);
-      d.setDate(dia);
-      if (d <= nowMX) d.setMonth(d.getMonth() + 1);
+      d.setUTCDate(dia);
+      if (d <= nowMX) d.setUTCMonth(d.getUTCMonth() + 1);
       return d;
     }
   }
@@ -902,11 +902,11 @@ function parsearFechaPedida(txt) {
 async function mostrarDisponibilidadEnFecha(from, fechaDate, prefijo = '¡Perfecto! 💈', serviceName = null) {
   const { data: barberos } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
   const dateStr  = toYMD(fechaDate);
-  const dayName  = DAY_MAP[fechaDate.getDay()];
+  const dayName  = DAY_MAP[fechaDate.getUTCDay()];
   const label    = formatDateMX(fechaDate);
   const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
   const esHoy = dateStr === nowMX.toISOString().slice(0, 10);
-  const horaActual = esHoy ? nowMX.getHours() * 60 + nowMX.getMinutes() : null;
+  const horaActual = esHoy ? nowMX.getUTCHours() * 60 + nowMX.getUTCMinutes() : null;
   const duracionMinutos = (await buscarDuracionServicio(serviceName)) || 60;
 
   const barberosDelDia = (barberos || []).filter(b => {
@@ -929,7 +929,7 @@ async function mostrarDisponibilidadEnFecha(from, fechaDate, prefijo = '¡Perfec
     const nextDays = getNextDays(7);
     let fallbackDate = null, fallbackLabel = null;
     for (const day of nextDays) {
-      const dn = DAY_MAP[day.getDay()];
+      const dn = DAY_MAP[day.getUTCDay()];
       const tieneBarbe = (barberos || []).some(b => {
         const schedule = Array.isArray(b.schedule) ? b.schedule : [];
         return schedule.some(d => normalizarTexto(d) === normalizarTexto(dn));
@@ -954,7 +954,7 @@ async function mostrarDisponibilidadEnFecha(from, fechaDate, prefijo = '¡Perfec
     }
 
     const fallbackStr = toYMD(fallbackDate);
-    const fallbackDayName = DAY_MAP[fallbackDate.getDay()];
+    const fallbackDayName = DAY_MAP[fallbackDate.getUTCDay()];
     let msgFallback = `😔 El *${label}* no tenemos disponibilidad.\n\nPero el *${fallbackLabel}* sí tenemos espacio:\n\n`;
     const barberosF = (barberos || []).filter(b => {
       const schedule = Array.isArray(b.schedule) ? b.schedule : [];
@@ -1040,10 +1040,10 @@ async function confirmarHorarioPuntual(from, text, fechaDate, fechaLabel, state)
   }
 
   const dateStr = toYMD(fechaDate);
-  const dayName = DAY_MAP[fechaDate.getDay()];
+  const dayName = DAY_MAP[fechaDate.getUTCDay()];
   const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
   const esHoy = dateStr === nowMX.toISOString().slice(0, 10);
-  const horaActual = esHoy ? nowMX.getHours() * 60 + nowMX.getMinutes() : null;
+  const horaActual = esHoy ? nowMX.getUTCHours() * 60 + nowMX.getUTCMinutes() : null;
 
   if (esHoy) {
     const [h, m] = horaSolicitada.split(':').map(Number);
@@ -1150,7 +1150,7 @@ async function confirmarHorarioPuntual(from, text, fechaDate, fechaLabel, state)
 
 async function prepararFechaYGuardarState(from, serviceName = null) {
   const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
-  const todayDayName = DAY_MAP[nowMX.getDay()];
+  const todayDayName = DAY_MAP[nowMX.getUTCDay()];
   const { data: barberos } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
 
   const hayBarberosHoy = barberos?.some(b => {
@@ -1168,7 +1168,7 @@ async function prepararFechaYGuardarState(from, serviceName = null) {
       return schedule.some(d => normalizarTexto(d) === normalizarTexto(todayDayName));
     });
     let haySlots = false;
-    const horaActual = nowMX.getHours() * 60 + nowMX.getMinutes();
+    const horaActual = nowMX.getUTCHours() * 60 + nowMX.getUTCMinutes();
     for (const b of barberosHoy) {
       const duracionMinutos = (await buscarDuracionServicio(serviceName)) || 60;
       const slots = await getSlotsLibres(b.id, todayStr, horaActual, duracionMinutos);
@@ -1181,7 +1181,7 @@ async function prepararFechaYGuardarState(from, serviceName = null) {
     const nextDays = getNextDays(4);
     const { data: bAll } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
     for (const day of nextDays) {
-      const dayName = DAY_MAP[day.getDay()];
+      const dayName = DAY_MAP[day.getUTCDay()];
       const tieneBarbe = bAll?.some(b => {
         const schedule = Array.isArray(b.schedule) ? b.schedule : [];
         return schedule.some(d => normalizarTexto(d) === normalizarTexto(dayName));
@@ -1620,10 +1620,10 @@ app.post('/webhook', async (req, res) => {
 
       const fechaStr   = toYMD(fechaPedida);
       const fechaLabel = formatDateMX(fechaPedida);
-      const dayName    = DAY_MAP[fechaPedida.getDay()];
+      const dayName    = DAY_MAP[fechaPedida.getUTCDay()];
       const nowMX      = new Date(Date.now() - 6 * 60 * 60 * 1000);
       const esHoy      = fechaStr === nowMX.toISOString().slice(0, 10);
-      const horaActual = esHoy ? nowMX.getHours() * 60 + nowMX.getMinutes() : null;
+      const horaActual = esHoy ? nowMX.getUTCHours() * 60 + nowMX.getUTCMinutes() : null;
 
       const { data: barberosDisp } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
       const barberosDelDia = (barberosDisp || []).filter(b => {
@@ -1666,9 +1666,9 @@ app.post('/webhook', async (req, res) => {
 
       const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
       const esHoy = state.fecha === nowMX.toISOString().slice(0, 10);
-      const horaActual = esHoy ? nowMX.getHours() * 60 + nowMX.getMinutes() : null;
+      const horaActual = esHoy ? nowMX.getUTCHours() * 60 + nowMX.getUTCMinutes() : null;
 
-      const dayName = DAY_MAP[new Date(`${state.fecha}T00:00:00`).getDay()];
+      const dayName = DAY_MAP[new Date(`${state.fecha}T00:00:00`).getUTCDay()];
       const { data: barberos } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
       const barberosDelDia = (barberos || []).filter(b => {
         const schedule = Array.isArray(b.schedule) ? b.schedule : [];
@@ -1790,7 +1790,7 @@ app.post('/webhook', async (req, res) => {
         const nextDays = getNextDays(4);
         const { data: barberosDisp } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
         for (const day of nextDays) {
-          const dayName = DAY_MAP[day.getDay()];
+          const dayName = DAY_MAP[day.getUTCDay()];
           const tieneBarbe = barberosDisp?.some(b => {
             const schedule = Array.isArray(b.schedule) ? b.schedule : [];
             return schedule.some(d => normalizarTexto(d) === normalizarTexto(dayName));
@@ -1815,7 +1815,7 @@ app.post('/webhook', async (req, res) => {
           const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
           const todayStr = nowMX.toISOString().slice(0, 10);
           const esHoy = fecha === todayStr;
-          const horaActual = esHoy ? nowMX.getHours() * 60 + nowMX.getMinutes() : null;
+          const horaActual = esHoy ? nowMX.getUTCHours() * 60 + nowMX.getUTCMinutes() : null;
           let horaPasada = false;
           if (esHoy) {
             const [h, m] = horaSolicitada.split(':').map(Number);
@@ -1913,7 +1913,7 @@ app.post('/webhook', async (req, res) => {
       const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
       const todayStr = nowMX.toISOString().slice(0, 10);
       const esHoy = state.fecha === todayStr;
-      const horaActual = esHoy ? nowMX.getHours() * 60 + nowMX.getMinutes() : null;
+      const horaActual = esHoy ? nowMX.getUTCHours() * 60 + nowMX.getUTCMinutes() : null;
       
       if (esHoy) {
         const [h, m] = horaSolicitada.split(':').map(Number);
@@ -1978,7 +1978,7 @@ app.post('/webhook', async (req, res) => {
         const { data: barberos } = await supabase.from('barbers').select('id, name').eq('active', true);
         const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
         const esHoy = state.fecha === nowMX.toISOString().slice(0, 10);
-        const horaActual = esHoy ? nowMX.getHours() * 60 + nowMX.getMinutes() : null;
+        const horaActual = esHoy ? nowMX.getUTCHours() * 60 + nowMX.getUTCMinutes() : null;
         
         // ✅ Buscar la hora que el cliente ya había seleccionado
         let horaSeleccionada = state.horaSeleccionada || null;
@@ -2140,7 +2140,7 @@ app.post('/webhook', async (req, res) => {
 
         const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
         const esHoy = state.fecha === nowMX.toISOString().slice(0, 10);
-        const horaActual = esHoy ? nowMX.getHours() * 60 + nowMX.getMinutes() : null;
+        const horaActual = esHoy ? nowMX.getUTCHours() * 60 + nowMX.getUTCMinutes() : null;
         
         const slotsLibres = await getSlotsLibres(barbero.id, state.fecha, horaActual);
         if (!slotsLibres.includes(horaSolicitada)) {
@@ -2184,7 +2184,7 @@ app.post('/webhook', async (req, res) => {
         if (barberoSolo) {
           const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
           const esHoy = state.fecha === nowMX.toISOString().slice(0, 10);
-          const horaActual = esHoy ? nowMX.getHours() * 60 + nowMX.getMinutes() : null;
+          const horaActual = esHoy ? nowMX.getUTCHours() * 60 + nowMX.getUTCMinutes() : null;
 
           const slotsLibres = await getSlotsLibres(barberoSolo.id, state.fecha, horaActual);
           if (!slotsLibres.includes(state.horaSeleccionada)) {
@@ -2237,7 +2237,7 @@ app.post('/webhook', async (req, res) => {
 
         const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
         const esHoy = state.fecha === nowMX.toISOString().slice(0, 10);
-        const horaActual = esHoy ? nowMX.getHours() * 60 + nowMX.getMinutes() : null;
+        const horaActual = esHoy ? nowMX.getUTCHours() * 60 + nowMX.getUTCMinutes() : null;
         
         if (esHoy) {
           const [h, m] = horaSolicitada.split(':').map(Number);
@@ -2305,7 +2305,7 @@ app.post('/webhook', async (req, res) => {
         if (barberoCambio) {
           const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
           const esHoy = state.fecha === nowMX.toISOString().slice(0, 10);
-          const horaActual = esHoy ? nowMX.getHours() * 60 + nowMX.getMinutes() : null;
+          const horaActual = esHoy ? nowMX.getUTCHours() * 60 + nowMX.getUTCMinutes() : null;
 
           const slotsLibresCambio = await getSlotsLibres(barberoCambio.id, state.fecha, horaActual);
           if (!slotsLibresCambio.includes(state.hora)) {
@@ -2720,7 +2720,7 @@ app.post('/webhook', async (req, res) => {
 
 app.get('/test-cron', async (req, res) => {
   const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
+  tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
   const tomorrowStr = tomorrow.toISOString().slice(0, 10);
   const { data: citas, error } = await supabase
     .from('appointments')
@@ -2838,7 +2838,7 @@ app.post('/test-send-image', async (req, res) => {
 app.get('/test-encuestas', async (req, res) => {
   const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
   const yesterday = new Date(nowMX);
-  yesterday.setDate(yesterday.getDate() - 1);
+  yesterday.setUTCDate(yesterday.getUTCDate() - 1);
   const yesterdayStr = yesterday.toISOString().slice(0, 10);
   const { data: citas, error } = await supabase
     .from('appointments')
@@ -2886,7 +2886,7 @@ app.get('/test-send', async (req, res) => {
 async function enviarRecordatorios(etiqueta = '') {
   const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
   const tomorrow = new Date(nowMX);
-  tomorrow.setDate(tomorrow.getDate() + 1);
+  tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
   const tomorrowStr = tomorrow.toISOString().slice(0, 10);
   console.log(`⏰ [${etiqueta}] Enviando recordatorios para ${tomorrowStr}...`);
 
@@ -2930,7 +2930,7 @@ async function enviarRecordatorios(etiqueta = '') {
 async function enviarEncuestas(etiqueta = '') {
   const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
   const yesterday = new Date(nowMX);
-  yesterday.setDate(yesterday.getDate() - 1);
+  yesterday.setUTCDate(yesterday.getUTCDate() - 1);
   const yesterdayStr = yesterday.toISOString().slice(0, 10);
   console.log(`⭐ [${etiqueta}] Enviando encuestas para citas del ${yesterdayStr}...`);
 
