@@ -48,6 +48,7 @@ const TEMPLATE_LANGUAGE_CANDIDATES = {
   barberia_recordatorio_24h:  ['es_MX'],
   barberia_confirmacion_cita: ['es_MX'],
   barberia_encuesta_servicio: ['es_MX'],
+  barberia_reenganche:       ['en', 'en_GB', 'en_US'],
   clientes_en_riesgo_cupon:            ['es_MX'],
   cliente_en_riesgo_reenganche:        ['en', 'en_GB', 'en_US', 'es_MX'],
   clientes_en_riesgo_recordatorio_suave: ['es_MX'],
