@@ -1559,7 +1559,7 @@ app.post('/webhook', async (req, res) => {
     // sin tener que escribir "cancelar" y volver a empezar desde cero.
     const esReagendar = [
       'reagendar', 're agendar', 'reprogramar',
-      'cambiar mi cita', 'cambiar la cita', 'cambiar de cita',
+      'cambiar mi cita', 'cambiar la cita', 'cambiar de cita', 'cambiar cita',
       'cambiar de fecha', 'cambiar de dia', 'cambiar de día',
       'mover mi cita', 'mover la cita', 'cambiar horario de mi cita',
       'otro dia para mi cita', 'otro día para mi cita', 'otra fecha para mi cita',
@@ -2561,8 +2561,12 @@ app.post('/webhook', async (req, res) => {
     const pareceHoraCita = /\d{1,2}(:\d{2})?\s*(am|pm|a\.?m\.?|p\.?m\.?|hrs?|horas?)\b/i.test(text)
       || /\b\d{1,2}:\d{2}\b/.test(text);
     const pareceFechaCita = !state && !!parsearFechaPedida(text);
-    const esAgendar = ['agendar', 'cita', 'appointment', 'reservar', 'turno', 'espacio', 'disponibilidad'].some(k => textLower.includes(k))
-      || pareceHoraCita || pareceFechaCita;
+    const esCancelarOReagendarIntent = esReagendar ||
+      ['cancelar', 'cancelo', 'cancelación', 'cancelacion', 'cancel'].some(k => textLower.includes(k));
+    const esAgendar = !esCancelarOReagendarIntent && (
+      ['agendar', 'cita', 'appointment', 'reservar', 'turno', 'espacio', 'disponibilidad'].some(k => textLower.includes(k))
+      || pareceHoraCita || pareceFechaCita
+    );
     const quiereCita = ['sí', 'si', 'yes', 'claro', 'por favor', 'quiero', 'reserva', 'reservar', 'aparta', 'apartar', 'anota', 'anotar'].some(k => textLower.includes(k));
     const esPrecio  = ['precio', 'precios', 'cuanto cuesta', 'cuánto cuesta', 'costo', 'servicio', 'servicios'].some(k => textLower.includes(k));
 
