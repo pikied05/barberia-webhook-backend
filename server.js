@@ -1491,7 +1491,7 @@ app.post('/webhook', async (req, res) => {
     // Para activar el modo prueba (solo responde a TEST_WHITELIST), cambia
     // manualmente esta línea a `true` y vuelve a desplegar.
     // ══════════════════════════════════════════════════════════════════════════
-    const TEST_MODE = false;
+    const TEST_MODE = true;
     const TEST_WHITELIST = [
       '5212711674600',
       '5215523297565'  // ← agrega aquí tus números de prueba (sin + ni espacios)
@@ -1772,7 +1772,13 @@ app.post('/webhook', async (req, res) => {
       'a las', 'a la', 'hrs', 'horas',
     ].some(k => textLower.includes(k));
 
-    if (esOtroHorario && state?.step !== 'confirmando') {
+    const pasosQueYaEsperanHora = [
+      'confirmando',
+      'esperando_hora_especifica',
+      'reagendar_seleccion',
+      'reagendar_confirmando',
+    ];
+    if (esOtroHorario && !pasosQueYaEsperanHora.includes(state?.step)) {
       // Si el mensaje ya trae una fecha explícita (ej. "mejor viernes a las 4pm"),
       // usarla en vez de asumir la fecha que ya estaba en el estado (o "hoy").
       const fechaEnMensajeOtroHorario = parsearFechaPedida(text);
