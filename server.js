@@ -377,7 +377,7 @@ async function preguntarPorServicio(from, state = null) {
   await chakraSendSession(from,
     `Para poder agendarte bien, necesito saber qué servicio quieres.\n\n` +
     `Di algo como: *corte*, *barba*, *corte y barba*, *afeitado* o *tinte*.\n\n` +
-    `Después solo dime la *hora* y el *barbero* (si no conoces a ninguno, te asignamos uno disponible 👌).`
+    `Después solo dime el *día y la hora* y el *barbero* (si no conoces a ninguno, te asignamos uno disponible 👌).`
   );
 }
 
@@ -1048,8 +1048,25 @@ async function confirmarHorarioPuntual(from, text, fechaDate, fechaLabel, state)
   if (esHoy) {
     const [h, m] = horaSolicitada.split(':').map(Number);
     if (h * 60 + m <= horaActual) {
-      await chakraSendSession(from, `😅 La hora *${horaSolicitada}* ya pasó. Por favor elige una hora futura.`);
-      return true;
+      // La hora ya pasó hoy → buscamos automáticamente el siguiente día
+      // en que haya algún barbero trabajando, en vez de solo rechazar.
+      const { data: barberosCheck } = await supabase.from('barbers').select('schedule').eq('active', true);
+      let nextDate = new Date(fechaDate);
+      let intentos = 0;
+      let tieneBarberoEseDia = false;
+      do {
+        nextDate = new Date(nextDate.getTime() + 24 * 60 * 60 * 1000);
+        const nextDayName = DAY_MAP[nextDate.getUTCDay()];
+        tieneBarberoEseDia = (barberosCheck || []).some(b => {
+          const schedule = Array.isArray(b.schedule) ? b.schedule : [];
+          return schedule.some(d => normalizarTexto(d) === normalizarTexto(nextDayName));
+        });
+        intentos++;
+      } while (!tieneBarberoEseDia && intentos < 7);
+
+      const nextLabel = formatDateMX(nextDate);
+      await chakraSendSession(from, `😅 La hora *${horaSolicitada}* ya pasó hoy, así que busco tu cita para el *${nextLabel}* automáticamente.`);
+      return await confirmarHorarioPuntual(from, text, nextDate, nextLabel, state);
     }
   }
 
@@ -1059,9 +1076,14 @@ async function confirmarHorarioPuntual(from, text, fechaDate, fechaLabel, state)
     return schedule.some(d => normalizarTexto(d) === normalizarTexto(dayName));
   });
 
-  // ¿El cliente mencionó un barbero específico por nombre?
+  // ¿El cliente mencionó un barbero específico por nombre? Si no lo menciona
+  // en este mensaje pero ya lo había pedido antes (guardado en el state),
+  // seguimos respetando esa preferencia.
   const nombreBuscadoPrevio = normalizarTexto(text);
-  const barberoNombrado = barberosDelDia.find(b => nombreBuscadoPrevio.includes(normalizarTexto(b.name)));
+  let barberoNombrado = barberosDelDia.find(b => nombreBuscadoPrevio.includes(normalizarTexto(b.name)));
+  if (!barberoNombrado && state?.barberoPreferidoId) {
+    barberoNombrado = barberosDelDia.find(b => b.id === state.barberoPreferidoId);
+  }
 
   // Duración: default 60 min. Solo si el cliente mencionó explícitamente el
   // servicio (ej. "barba") usamos su duración real — nunca se le pregunta.
@@ -1109,10 +1131,15 @@ async function confirmarHorarioPuntual(from, text, fechaDate, fechaLabel, state)
       fechaLabel,
       barberoPreferidoId: barberoNombrado.id,
       barberoPreferidoName: barberoNombrado.name,
+      horaPendiente: horaSolicitada,
+      serviceName: servicioMencionado || state?.serviceName || null,
     };
     await chakraSendSession(from,
       `😔 *${barberoNombrado.name}* no está libre a las *${horaSolicitada}*, ya tiene una cita a esa hora.\n\n` +
-      `Sus horarios más cercanos el *${fechaLabel}* son: *${cercanos.join(', ')}*.\n¿Cuál prefieres? (o dime otra hora/día)`
+      `Tienes 2 opciones:\n` +
+      `1️⃣ Sus horarios más cercanos el *${fechaLabel}*: *${cercanos.join(', ')}*\n` +
+      `2️⃣ Que te asigne *otro barbero* disponible a las *${horaSolicitada}*\n\n` +
+      `Dime cuál prefieres (o dime otra hora/día).`
     );
     return true;
   }
@@ -1871,6 +1898,22 @@ app.post('/webhook', async (req, res) => {
 
     // ── Esperando hora específica ────────────────────────────────────────────
     if (state?.step === 'esperando_hora_especifica') {
+      // Si el cliente elige la opción "otro barbero" tras el ofrecimiento de
+      // horarios cercanos, le asignamos cualquier barbero libre a la hora
+      // que ya había pedido, sin tener que volver a escribir la hora.
+      const quiereOtroBarbero = [
+        'otro barbero', 'otra persona', 'cualquiera', 'el que sea', 'quien sea',
+        'que sea otro', 'me da igual', 'no importa quien', 'no importa quién',
+        'asigname otro', 'asígname otro', 'opcion 2', 'opción 2',
+      ].some(k => textLower.includes(k));
+
+      if (quiereOtroBarbero && state?.horaPendiente && state?.fecha) {
+        const fechaDateOtro = new Date(`${state.fecha}T00:00:00Z`);
+        const stateSinBarberoPref = { ...state, barberoPreferidoId: null, barberoPreferidoName: null };
+        const yaRespondidoOtro = await confirmarHorarioPuntual(from, state.horaPendiente, fechaDateOtro, state.fechaLabel, stateSinBarberoPref);
+        if (yaRespondidoOtro) return;
+      }
+
       // Si menciona una fecha explícita ("sábado", "mañana", etc.), checar esa
       // fecha — y si también dio una hora en el mismo mensaje, ir directo a
       // confirmar disponibilidad puntual en vez de solo mostrar la lista.
@@ -2622,7 +2665,7 @@ app.post('/webhook', async (req, res) => {
         `¿Te reservo algún espacio para vivir la experiencia IMPERIUM? 💈\n\n` +
         `Solo dime:\n` +
         `1️⃣ *Servicio* (corte, barba, corte y barba, afeitado, tinte)\n` +
-        `2️⃣ *Hora* que prefieras\n` +
+        `2️⃣ *Día y hora* que prefieras\n` +
         `3️⃣ *Barbero* de tu preferencia (si no conoces a ninguno, no te preocupes, te asignamos uno disponible 👌)`
       );
       return;
