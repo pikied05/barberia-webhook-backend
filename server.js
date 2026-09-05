@@ -1857,9 +1857,14 @@ app.post('/webhook', async (req, res) => {
           }
 
           if (!horaPasada) {
-            const { data: barberosLaHora } = await supabase.from('barbers').select('id, name').eq('active', true);
+            const dayNameLaHora = DAY_MAP[new Date(`${fecha}T00:00:00`).getUTCDay()];
+            const { data: barberosLaHora } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
+            const barberosDelDiaLaHora = (barberosLaHora || []).filter(b => {
+              const schedule = Array.isArray(b.schedule) ? b.schedule : [];
+              return schedule.some(d => normalizarTexto(d) === normalizarTexto(dayNameLaHora));
+            });
             const disponiblesLaHora = [];
-            for (const barbero of (barberosLaHora || [])) {
+            for (const barbero of barberosDelDiaLaHora) {
               const slotsLibres = await getSlotsLibres(barbero.id, fecha, esHoy ? horaActual : null);
               if (slotsLibres.includes(horaSolicitada)) disponiblesLaHora.push(barbero);
             }
@@ -1976,9 +1981,14 @@ app.post('/webhook', async (req, res) => {
       const servicioSolicitado = await extraerServicioDelMensaje(text) || state?.serviceName || null;
       const duracionDetectada = (await buscarDuracionServicio(servicioSolicitado)) || 60;
 
-      const { data: barberos } = await supabase.from('barbers').select('id, name').eq('active', true);
+      const dayNameSel = DAY_MAP[new Date(`${state.fecha}T00:00:00`).getUTCDay()];
+      const { data: barberos } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
+      const barberosDelDiaSel = (barberos || []).filter(b => {
+        const schedule = Array.isArray(b.schedule) ? b.schedule : [];
+        return schedule.some(d => normalizarTexto(d) === normalizarTexto(dayNameSel));
+      });
       const disponibles = [];
-      for (const barbero of (barberos || [])) {
+      for (const barbero of barberosDelDiaSel) {
         const slotsLibres = await getSlotsLibres(barbero.id, state.fecha, esHoy ? horaActual : null, duracionDetectada);
         if (slotsLibres.includes(horaSolicitada)) disponibles.push(barbero);
       }
@@ -2025,7 +2035,12 @@ app.post('/webhook', async (req, res) => {
       }
 
       if (textLower.includes('cualquiera') || textLower.includes('cualquier')) {
-        const { data: barberos } = await supabase.from('barbers').select('id, name').eq('active', true);
+        const dayNameCualq = DAY_MAP[new Date(`${state.fecha}T00:00:00`).getUTCDay()];
+        const { data: barberos } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
+        const barberosDelDiaCualq = (barberos || []).filter(b => {
+          const schedule = Array.isArray(b.schedule) ? b.schedule : [];
+          return schedule.some(d => normalizarTexto(d) === normalizarTexto(dayNameCualq));
+        });
         const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
         const esHoy = state.fecha === nowMX.toISOString().slice(0, 10);
         const horaActual = esHoy ? nowMX.getUTCHours() * 60 + nowMX.getUTCMinutes() : null;
@@ -2040,7 +2055,7 @@ app.post('/webhook', async (req, res) => {
         // TODOS los barberos disponibles a esa hora (no siempre el primero).
         if (horaSeleccionada) {
           const disponiblesHora = [];
-          for (const barbero of (barberos || [])) {
+          for (const barbero of barberosDelDiaCualq) {
             const slotsLibres = await getSlotsLibres(barbero.id, state.fecha, horaActual);
             if (slotsLibres.includes(horaSeleccionada)) disponiblesHora.push(barbero);
           }
@@ -2055,7 +2070,7 @@ app.post('/webhook', async (req, res) => {
         // tomar al azar uno de sus primeros slots libres.
         if (!barberoAsignado) {
           const barberosConEspacio = [];
-          for (const barbero of (barberos || [])) {
+          for (const barbero of barberosDelDiaCualq) {
             const slotsLibres = await getSlotsLibres(barbero.id, state.fecha, horaActual);
             if (slotsLibres.length > 0) barberosConEspacio.push({ barbero, slotsLibres });
           }
@@ -2170,7 +2185,7 @@ app.post('/webhook', async (req, res) => {
         const servicioSolicitado = await extraerServicioDelMensaje(text) || state.serviceName || 'Corte Premium';
 
         const nombreBuscado = normalizarTexto(matchNombreHora.nombre);
-        const { data: barberos } = await supabase.from('barbers').select('id, name').eq('active', true);
+        const { data: barberos } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
 
         const barbero = barberos?.find(b => {
           const nombreBarbero = normalizarTexto(b.name);
@@ -2184,6 +2199,16 @@ app.post('/webhook', async (req, res) => {
             `Nuestros barberos son: ${nombresDisponibles}\n\n` +
             `Revisa el nombre o solo manda la hora para que te asignemos uno.\n` +
             `Ej: *15:00* o *3 pm*`
+          );
+          return;
+        }
+
+        const dayNameNombreHora = DAY_MAP[new Date(`${state.fecha}T00:00:00`).getUTCDay()];
+        const scheduleBarbero = Array.isArray(barbero.schedule) ? barbero.schedule : [];
+        const trabajaEseDia = scheduleBarbero.some(d => normalizarTexto(d) === normalizarTexto(dayNameNombreHora));
+        if (!trabajaEseDia) {
+          await chakraSendSession(from,
+            `😔 *${barbero.name}* no trabaja el *${state.fechaLabel}*.\n¿Quieres otro día, o que te asigne otro barbero disponible?`
           );
           return;
         }
@@ -2225,13 +2250,20 @@ app.post('/webhook', async (req, res) => {
       // ── Solo mandó el nombre del barbero (sin hora) → usar la hora ya seleccionada ──
       if (!matchNombreHora && !soloHoraMatch && state.horaSeleccionada) {
         const nombreBuscado = normalizarTexto(text);
-        const { data: barberosSolo } = await supabase.from('barbers').select('id, name').eq('active', true);
+        const { data: barberosSolo } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
         const barberoSolo = barberosSolo?.find(b => {
           const nombreBarbero = normalizarTexto(b.name);
           return nombreBarbero.includes(nombreBuscado) || nombreBuscado.includes(nombreBarbero);
         });
 
         if (barberoSolo) {
+          const dayNameSolo = DAY_MAP[new Date(`${state.fecha}T00:00:00`).getUTCDay()];
+          const scheduleSolo = Array.isArray(barberoSolo.schedule) ? barberoSolo.schedule : [];
+          if (!scheduleSolo.some(d => normalizarTexto(d) === normalizarTexto(dayNameSolo))) {
+            await chakraSendSession(from, `😔 *${barberoSolo.name}* no trabaja el *${state.fechaLabel}*.\n¿Quieres otro día, o que te asigne otro barbero disponible?`);
+            return;
+          }
+
           const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
           const esHoy = state.fecha === nowMX.toISOString().slice(0, 10);
           const horaActual = esHoy ? nowMX.getUTCHours() * 60 + nowMX.getUTCMinutes() : null;
@@ -2297,9 +2329,14 @@ app.post('/webhook', async (req, res) => {
           }
         }
 
-        const { data: barberos } = await supabase.from('barbers').select('id, name').eq('active', true);
+        const dayNameSoloHora = DAY_MAP[new Date(`${state.fecha}T00:00:00`).getUTCDay()];
+        const { data: barberos } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
+        const barberosDelDiaSoloHora = (barberos || []).filter(b => {
+          const schedule = Array.isArray(b.schedule) ? b.schedule : [];
+          return schedule.some(d => normalizarTexto(d) === normalizarTexto(dayNameSoloHora));
+        });
         const disponibles = [];
-        for (const barbero of (barberos || [])) {
+        for (const barbero of barberosDelDiaSoloHora) {
           const slotsLibres = await getSlotsLibres(barbero.id, state.fecha, horaActual);
           if (slotsLibres.includes(horaSolicitada)) disponibles.push(barbero);
         }
@@ -2346,13 +2383,20 @@ app.post('/webhook', async (req, res) => {
       // ── Quiere cambiar de barbero (solo si lo pide) — mantiene la misma hora ──
       if (!confirma && !cancela && state.hora) {
         const nombreBuscadoCambio = normalizarTexto(text);
-        const { data: barberosCambio } = await supabase.from('barbers').select('id, name').eq('active', true);
+        const { data: barberosCambio } = await supabase.from('barbers').select('id, name, schedule').eq('active', true);
         const barberoCambio = barberosCambio?.find(b => {
           const nombreBarbero = normalizarTexto(b.name);
           return (nombreBarbero.includes(nombreBuscadoCambio) || nombreBuscadoCambio.includes(nombreBarbero)) && nombreBarbero !== normalizarTexto(state.barberoName || '');
         });
 
         if (barberoCambio) {
+          const dayNameCambio = DAY_MAP[new Date(`${state.fecha}T00:00:00`).getUTCDay()];
+          const scheduleCambio = Array.isArray(barberoCambio.schedule) ? barberoCambio.schedule : [];
+          if (!scheduleCambio.some(d => normalizarTexto(d) === normalizarTexto(dayNameCambio))) {
+            await chakraSendSession(from, `😔 *${barberoCambio.name}* no trabaja el *${state.fechaLabel}*.\n¿Quieres intentar otro barbero, otra hora, o mantener a *${state.barberoName}*?`);
+            return;
+          }
+
           const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000);
           const esHoy = state.fecha === nowMX.toISOString().slice(0, 10);
           const horaActual = esHoy ? nowMX.getUTCHours() * 60 + nowMX.getUTCMinutes() : null;
