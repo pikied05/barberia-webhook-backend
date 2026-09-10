@@ -373,8 +373,16 @@ async function buildPreciosMsg(includeCTA = true) {
   return mensajePrecios;
 }
 
-async function preguntarPorServicio(from, state = null) {
-  conversationState[from] = { ...(state || {}), step: 'esperando_servicio' };
+async function preguntarPorServicio(from, state = null, originalText = null) {
+  // Si el cliente ya mencionó día/hora en este mismo mensaje (ej. "Miércoles
+  // 9 de septiembre 5 pm"), lo guardamos para no perderlo mientras esperamos
+  // a que responda el servicio; así podemos agendarlo directo en esa fecha/
+  // hora en lugar de mostrarle la disponibilidad genérica del día.
+  conversationState[from] = {
+    ...(state || {}),
+    step: 'esperando_servicio',
+    mensajePendienteAgenda: originalText || state?.mensajePendienteAgenda || null,
+  };
   await chakraSendSession(from,
     `Para poder agendarte bien, necesito saber qué servicio quieres.\n\n` +
     `Di algo como: *corte*, *barba*, *corte y barba*, *afeitado* o *tinte*.\n\n` +
@@ -1568,10 +1576,20 @@ app.post('/webhook', async (req, res) => {
         ? 'Corte Premium'
         : servicioSolicitado;
 
-      conversationState[from] = { ...state, step: 'esperando_confirmacion_cita', serviceName: servicioFinal };
-      const fechaMencionada = parsearFechaPedida(text);
+      conversationState[from] = { ...state, step: 'esperando_confirmacion_cita', serviceName: servicioFinal, mensajePendienteAgenda: null };
+
+      // El mensaje que responde el servicio (ej. "Corte y barba") normalmente
+      // no trae día/hora. Si el cliente ya los había dado en el mensaje
+      // anterior (guardado en mensajePendienteAgenda), lo combinamos con la
+      // respuesta actual para no perder esa fecha/hora y poder agendar
+      // directo en vez de mostrar la disponibilidad genérica del día.
+      const textoCombinado = state?.mensajePendienteAgenda
+        ? `${state.mensajePendienteAgenda} ${text}`
+        : text;
+
+      const fechaMencionada = parsearFechaPedida(textoCombinado);
       const fechaParaHora = fechaMencionada || new Date(Date.now() - 6 * 60 * 60 * 1000);
-      const yaAtendido = await confirmarHorarioPuntual(from, text, fechaParaHora, formatDateMX(fechaParaHora), { ...state, serviceName: servicioFinal });
+      const yaAtendido = await confirmarHorarioPuntual(from, textoCombinado, fechaParaHora, formatDateMX(fechaParaHora), { ...state, serviceName: servicioFinal });
       if (yaAtendido) return;
       if (fechaMencionada) {
         await mostrarDisponibilidadEnFecha(from, fechaMencionada, '¡Perfecto!', servicioFinal);
@@ -2219,8 +2237,48 @@ app.post('/webhook', async (req, res) => {
         
         const slotsLibres = await getSlotsLibres(barbero.id, state.fecha, horaActual);
         if (!slotsLibres.includes(horaSolicitada)) {
-          await chakraSendSession(from, `😔 Ese horario ya no está disponible con *${barbero.name}*.\nEscribe *hola* para ver los horarios actualizados.`);
-          delete conversationState[from];
+          if (!slotsLibres.length) {
+            conversationState[from] = {
+              ...(conversationState[from] || {}),
+              step: 'esperando_hora_especifica',
+              fecha: state.fecha,
+              fechaLabel: state.fechaLabel,
+              serviceName: servicioSolicitado,
+            };
+            await chakraSendSession(from,
+              `😔 *${barbero.name}* no tiene horarios libres el *${state.fechaLabel}*.\n¿Quieres otro día, o que te asigne otro barbero disponible?`
+            );
+            return;
+          }
+
+          const [hReq, mReq] = horaSolicitada.split(':').map(Number);
+          const minutosReq = hReq * 60 + mReq;
+          const cercanos = [...slotsLibres]
+            .sort((a, b) => {
+              const [ha, ma] = a.split(':').map(Number);
+              const [hb, mb] = b.split(':').map(Number);
+              return Math.abs((ha * 60 + ma) - minutosReq) - Math.abs((hb * 60 + mb) - minutosReq);
+            })
+            .slice(0, 3)
+            .sort();
+
+          conversationState[from] = {
+            ...(conversationState[from] || {}),
+            step: 'esperando_hora_especifica',
+            fecha: state.fecha,
+            fechaLabel: state.fechaLabel,
+            barberoPreferidoId: barbero.id,
+            barberoPreferidoName: barbero.name,
+            horaPendiente: horaSolicitada,
+            serviceName: servicioSolicitado,
+          };
+          await chakraSendSession(from,
+            `😔 Ese horario ya no está disponible con *${barbero.name}*.\n\n` +
+            `Tienes 2 opciones:\n` +
+            `1️⃣ Sus horarios más cercanos el *${state.fechaLabel}*: *${cercanos.join(', ')}*\n` +
+            `2️⃣ Que te asigne *otro barbero* disponible a las *${horaSolicitada}*\n\n` +
+            `Dime cuál prefieres (o dime otra hora/día).`
+          );
           return;
         }
 
@@ -2270,7 +2328,44 @@ app.post('/webhook', async (req, res) => {
 
           const slotsLibres = await getSlotsLibres(barberoSolo.id, state.fecha, horaActual);
           if (!slotsLibres.includes(state.horaSeleccionada)) {
-            await chakraSendSession(from, `😔 Ese horario ya no está disponible con *${barberoSolo.name}*.\n¿Quieres intentar otra hora u otro barbero? Dime cuál, o escribe *cancelar*.`);
+            if (!slotsLibres.length) {
+              conversationState[from] = {
+                ...(conversationState[from] || {}),
+                step: 'esperando_hora_especifica',
+                fecha: state.fecha,
+                fechaLabel: state.fechaLabel,
+              };
+              await chakraSendSession(from, `😔 *${barberoSolo.name}* no tiene horarios libres el *${state.fechaLabel}*.\n¿Quieres otro día, o que te asigne otro barbero disponible?`);
+              return;
+            }
+
+            const [hReq, mReq] = state.horaSeleccionada.split(':').map(Number);
+            const minutosReq = hReq * 60 + mReq;
+            const cercanos = [...slotsLibres]
+              .sort((a, b) => {
+                const [ha, ma] = a.split(':').map(Number);
+                const [hb, mb] = b.split(':').map(Number);
+                return Math.abs((ha * 60 + ma) - minutosReq) - Math.abs((hb * 60 + mb) - minutosReq);
+              })
+              .slice(0, 3)
+              .sort();
+
+            conversationState[from] = {
+              ...(conversationState[from] || {}),
+              step: 'esperando_hora_especifica',
+              fecha: state.fecha,
+              fechaLabel: state.fechaLabel,
+              barberoPreferidoId: barberoSolo.id,
+              barberoPreferidoName: barberoSolo.name,
+              horaPendiente: state.horaSeleccionada,
+            };
+            await chakraSendSession(from,
+              `😔 Ese horario ya no está disponible con *${barberoSolo.name}*.\n\n` +
+              `Tienes 2 opciones:\n` +
+              `1️⃣ Sus horarios más cercanos el *${state.fechaLabel}*: *${cercanos.join(', ')}*\n` +
+              `2️⃣ Que te asigne *otro barbero* disponible a las *${state.horaSeleccionada}*\n\n` +
+              `Dime cuál prefieres (o dime otra hora/día).`
+            );
             return;
           }
 
@@ -2680,7 +2775,7 @@ app.post('/webhook', async (req, res) => {
         await mostrarDisponibilidadEnFecha(from, fechaPedida, '¡Perfecto!', servicioParaFecha);
       } else if (quiereCita || esAgendar) {
         if (!servicioSolicitado) {
-          await preguntarPorServicio(from, state);
+          await preguntarPorServicio(from, state, text);
           return;
         }
 
@@ -2725,7 +2820,7 @@ app.post('/webhook', async (req, res) => {
 
       const servicioSolicitado = await extraerServicioDelMensaje(text) || state?.serviceName || null;
       if (!servicioSolicitado) {
-        await preguntarPorServicio(from, state);
+        await preguntarPorServicio(from, state, text);
         return;
       }
 
@@ -2744,7 +2839,7 @@ app.post('/webhook', async (req, res) => {
     if (esAgendar) {
       const servicioSolicitado = await extraerServicioDelMensaje(text) || state?.serviceName || null;
       if (!servicioSolicitado) {
-        await preguntarPorServicio(from, state);
+        await preguntarPorServicio(from, state, text);
         return;
       }
 
