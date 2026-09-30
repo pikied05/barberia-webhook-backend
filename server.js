@@ -1374,14 +1374,22 @@ function extraerServicioDelMensajePorPalabrasClave(text) {
   // Combos específicos primero (más específico gana), luego servicios individuales.
   // El nombre de la izquierda es lo que se busca en el texto; el de la derecha es
   // el nombre canónico que se guarda/muestra.
+  //
+  // Defaults para pedidos genéricos (decisión de negocio, confirmada con Mar):
+  //   "barba"     -> Barba Premium
+  //   "afeitado"  -> Barba Express
+  //   "tinte"     -> Tinte de barba
+  //   "cejas" / "perfilado" -> Delineado de Ceja Premium
+  // Deben coincidir EXACTO con el nombre del servicio activo en Supabase, o
+  // el agendado no encontrará precio/duración.
   const candidatos = [
     { patron: /corte\s*y\s*barba|barba\s*y\s*corte/, nombre: 'Corte y Barba Imperial' },
     { patron: /corte\s*(de\s*)?barba/, nombre: 'Corte y Barba Imperial' }, // "corte de barba" = quiere ambos
-    { patron: /\bbarba\b/, nombre: 'Barba' },
-    { patron: /\bafeitado\b/, nombre: 'Afeitado' },
-    { patron: /\btinte\b/, nombre: 'Tinte' },
-    { patron: /\bcejas\b/, nombre: 'Perfilado de Cejas' },
-    { patron: /\bperfilado\b/, nombre: 'Perfilado de Cejas' },
+    { patron: /\bafeitado\b/, nombre: 'Barba Express' },
+    { patron: /\bbarba\b/, nombre: 'Barba Premium' },
+    { patron: /\btinte\b/, nombre: 'Tinte de barba' },
+    { patron: /\bcejas\b/, nombre: 'Delineado de Ceja Premium' },
+    { patron: /\bperfilado\b/, nombre: 'Delineado de Ceja Premium' },
     { patron: /corte\s*(premium|clasico|ejecutivo|especial)/, nombre: null }, // se resuelve abajo con el modificador
     { patron: /\bcorte\b/, nombre: 'Corte Premium' },
   ];
@@ -1413,9 +1421,16 @@ function tokensSignificativos(nombre) {
 // Busca coincidencia contra los servicios REALES y activos en Supabase, para
 // que cualquier servicio que se dé de alta ahí (ej. "Corte Infantil") se
 // reconozca automáticamente sin tener que tocar código cada vez.
-// Elige el servicio cuyo nombre tiene más palabras coincidentes con el
-// mensaje del cliente (y, en empate, el de mayor proporción de coincidencia,
-// para preferir nombres más específicos sobre genéricos).
+//
+// 🔥 FIX: antes se aceptaba la mejor coincidencia PARCIAL (aunque solo
+// compartiera una palabra), así que un cliente que solo escribía "Corte"
+// podía terminar agendado en "Corte Infantil" o "Corte Premium" (ambos
+// contienen la palabra "corte"), y "barba" podía caer en "Tinte de Barba".
+// Ahora solo se acepta un servicio del catálogo si TODAS sus palabras
+// significativas aparecen en el mensaje (match completo, no parcial). Si
+// nada del catálogo calza al 100%, se cae al respaldo por palabras clave
+// (extraerServicioDelMensajePorPalabrasClave), que ya interpreta bien los
+// casos genéricos como "corte", "barba", "corte y barba", etc.
 async function extraerServicioDelMensajeDB(text) {
   const textoNorm = normalizarTexto(text);
   const { data: servicios, error } = await supabase.from('services').select('name').eq('active', true);
@@ -1423,18 +1438,20 @@ async function extraerServicioDelMensajeDB(text) {
 
   let mejorNombre = null;
   let mejorMatched = 0;
-  let mejorRatio = 0;
 
   for (const s of servicios) {
     const tokens = tokensSignificativos(s.name);
     if (!tokens.length) continue;
     const matched = tokens.filter(t => textoNorm.includes(t)).length;
-    if (matched === 0) continue;
-    const ratio = matched / tokens.length;
-    if (matched > mejorMatched || (matched === mejorMatched && ratio > mejorRatio)) {
+    // Solo cuenta si el mensaje contiene TODAS las palabras del servicio,
+    // no una coincidencia parcial.
+    if (matched !== tokens.length) continue;
+    // Entre varios matches completos, gana el nombre más específico (más
+    // palabras), ej. "Corte Premium" sobre "Corte" si el cliente escribió
+    // "corte premium".
+    if (matched > mejorMatched) {
       mejorNombre = s.name;
       mejorMatched = matched;
-      mejorRatio = ratio;
     }
   }
   return mejorNombre;
