@@ -2167,7 +2167,7 @@ app.post('/webhook', async (req, res) => {
             meridiano: nombreHora[4] || ''
           };
         } else {
-          // ── Hora seguida del nombre SIN conector (ej. "14:00 Raúl") ──────────
+          // ── Hora seguida del nombre SIN conector (ej. "14:00 <barbero>") ──────────
           // Antes esto caía directo a "solo hora" e ignoraba el nombre por completo,
           // asignando un barbero al azar en vez del que el cliente pidió.
           // Validamos contra la lista real de barberos para no confundir palabras
@@ -2483,7 +2483,7 @@ app.post('/webhook', async (req, res) => {
         return;
       }
 
-      await chakraSendSession(from, `No entendí tu selección 😅\nEscríbeme así:\n- *Nombre del barbero* + hora: _Raúl 15:00_\n- O solo la hora: _15:00_ o _3 pm_\n\nO escribe *cancelar* para salir.`);
+      await chakraSendSession(from, `No entendí tu selección 😅\nEscríbeme así:\n- *Nombre del barbero* + hora: _Nombre 15:00_\n- O solo la hora: _15:00_ o _3 pm_\n\nO escribe *cancelar* para salir.`);
       return;
     }
 
@@ -2783,14 +2783,15 @@ app.post('/webhook', async (req, res) => {
     // ── Si está esperando confirmación de si quiere cita ─────────────────────
     if (state?.step === 'esperando_confirmacion_cita') {
       const fechaPedida = parsearFechaPedida(text);
-      const servicioSolicitado = await extraerServicioDelMensaje(text) || state?.serviceName || null;
+      const servicioEnTexto = await extraerServicioDelMensaje(text);
+      const servicioSolicitado = servicioEnTexto || state?.serviceName || null;
 
       if (fechaPedida) {
         const servicioParaFecha = servicioSolicitado || state?.serviceName || null;
         const yaAtendidoFecha = await confirmarHorarioPuntual(from, text, fechaPedida, formatDateMX(fechaPedida), { ...state, serviceName: servicioParaFecha });
         if (yaAtendidoFecha) return;
         await mostrarDisponibilidadEnFecha(from, fechaPedida, '¡Perfecto!', servicioParaFecha);
-      } else if (quiereCita || esAgendar) {
+      } else if (quiereCita || esAgendar || servicioEnTexto) {
         if (!servicioSolicitado) {
           await preguntarPorServicio(from, state, text);
           return;
