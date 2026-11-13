@@ -230,6 +230,51 @@ function getHorarioLabel(fechaODateStr) {
   return `${slots[0]} – ${slots[slots.length - 1]}`;
 }
 
+// ─── El bot solo conversa cuando la barbería está CERRADA ────────────────────
+// Con la barbería abierta, el equipo atiende a mano. Siguen funcionando siempre:
+//   • los botones de los recordatorios (confirmar / cancelar cita)
+//   • las respuestas de texto a esos recordatorios (SÍ, CONFIRMO, CANCELAR...)
+//   • las respuestas a la encuesta de servicio
+// Los envíos automáticos por cron (recordatorios y encuestas) no pasan por aquí.
+// Para desactivarlo sin tocar código: BOT_SOLO_FUERA_DE_HORARIO=false en el .env
+const BOT_SOLO_FUERA_DE_HORARIO = process.env.BOT_SOLO_FUERA_DE_HORARIO !== 'false';
+const HORA_APERTURA_MIN = 10 * 60; // 10:00
+
+function barberiaAbiertaAhora() {
+  const nowMX = new Date(Date.now() - 6 * 60 * 60 * 1000); // hora de México (UTC-6)
+  const minutos = nowMX.getUTCHours() * 60 + nowMX.getUTCMinutes();
+  return minutos >= HORA_APERTURA_MIN && minutos < getCierreDelDia(nowMX);
+}
+
+const RESPUESTAS_CONFIRMACION_CITA = [
+  'si', 'sí', 'si confirmo', 'sí confirmo', 'sí, confirmo', 'si, confirmo',
+  'confirmo', 'confirmar', 'confirmada', '1', 'yes', 'ok', '✅',
+  'no', 'cancelar', 'cancelo', 'cancel', 'no puedo asistir',
+];
+
+// true = con la barbería abierta, el bot NO debe contestar este mensaje.
+async function debeIgnorarPorHorario(msg, from) {
+  if (!BOT_SOLO_FUERA_DE_HORARIO || !barberiaAbiertaAhora()) return false;
+
+  // Botones (confirmar / cancelar de los recordatorios): siempre funcionan.
+  if (msg.type === 'interactive') return false;
+
+  if (msg.type === 'text') {
+    // Respuesta a una encuesta enviada (o dentro de su ventana de gracia).
+    if (await getEncuestaPendiente(from)) return false;
+
+    // Respuesta corta de confirmar / cancelar a un recordatorio, solo si no
+    // está en medio de un flujo de agendado y tiene una cita próxima.
+    const t = (msg.text?.body || '').trim().toLowerCase().replace(/[.!¡¿?]/g, '').trim();
+    if (!conversationState[from] && RESPUESTAS_CONFIRMACION_CITA.includes(t)) {
+      const { cita } = await getClienteYCita(from);
+      if (cita) return false;
+    }
+  }
+
+  return true;
+}
+
 const DAY_MAP = { 0: 'Dom', 1: 'Lun', 2: 'Mar', 3: 'Mié', 4: 'Jue', 5: 'Vie', 6: 'Sáb' };
 
 function getNextDays(n = 5) {
@@ -1499,6 +1544,11 @@ app.post('/webhook', async (req, res) => {
 
     if (yaFueProcesado(msg.id)) {
       console.log(`♻️ Webhook duplicado ignorado (wamid ${msg.id})`);
+      return;
+    }
+
+    if (await debeIgnorarPorHorario(msg, from)) {
+      console.log(`🏪 Barbería abierta, el bot no responde a ${from}`);
       return;
     }
 
